@@ -4,7 +4,7 @@
 
 - The public React website is hosted on GitHub Pages: `https://parshvak26.github.io/ai-healthcare-front-desk/`.
 - GitHub Actions builds the website from `main`. It uses the `VITE_API_BASE_URL` repository variable when set, with the demo Worker URL as a default.
-- Healthcare uses a separate Supabase free project, keeping its service key separate from HVAC. Worker source targets protected RPC functions; the private schema migration is applied and verified. Cloudflare still runs the older D1 deployment until its Supabase secret is set and the Worker is redeployed. The old D1 migration is retained as history.
+- Healthcare uses a separate Supabase project, keeping its service key separate from HVAC. The private schema migration is applied and verified. The Cloudflare Worker now targets the protected Supabase RPC functions; its encrypted Production secret is set, and `/api/health` confirms the database connection. The old D1 migration is retained as history.
 - The Cloudflare Worker API is deployed at `https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev`. It uses synthetic data, simulates reminders, and accepts Retell events only from configured test numbers.
 - Cloudflare persisted observability logs and preview URLs are disabled in the Worker configuration to keep the demo small and avoid unnecessary public preview endpoints. Use `wrangler tail` for temporary diagnostics when needed.
 - Retell live calling is off. The signed-in workspace currently reports the service as deactivated, so calls cannot be tested until that account state changes.
@@ -18,14 +18,14 @@ The `Build and deploy demo website` workflow installs the locked dependencies, b
 
 Use the separate Supabase project for healthcare; do not put the healthcare key in the HVAC Worker. The browser never connects to Supabase; only the Worker holds the server-side key. Access uses service-role-only RPC functions, so the private schema does not need to be exposed through the public API.
 
-1. **Done:** `supabase/migrations/20261003000100_healthcare_demo_backend.sql` has been applied in the healthcare Supabase project's SQL Editor. It creates only the private `healthcare` schema and its tables/functions.
-2. Store the Supabase server-side secret key in Cloudflare Worker secrets as `SUPABASE_SECRET_KEY`. Do not add it to GitHub or the website.
-3. Run `npm run deploy:api` to publish `ai-healthcare-front-desk-api` from `wrangler.toml`.
-4. Open the Worker URL plus `/api/health`. Confirm it reports `synthetic-demo`, the database is connected, and live calls and live SMS are disabled.
-5. The website workflow defaults to the Worker URL. Set the optional GitHub repository **variable** `VITE_API_BASE_URL` only if you change the API host, then rerun the Pages workflow.
-6. Reload the public site and confirm the header shows that the shared cloud demo is connected.
+1. **Done:** `supabase/migrations/20261003000100_healthcare_demo_backend.sql` is applied in the healthcare Supabase project. It creates only the private `healthcare` schema and its tables/functions.
+2. **Done:** The Supabase server-side secret is stored in Cloudflare Production as `SUPABASE_SECRET_KEY`. It is not in GitHub or the website.
+3. **Done:** `ai-healthcare-front-desk-api` is deployed from `wrangler.toml` and uses the Supabase-backed Worker source.
+4. **Verified:** `/api/health` reports `synthetic-demo`, `databaseConnected: true`, and both live calling and live SMS disabled.
+5. **Done:** The website workflow defaults to the Worker URL; no `VITE_API_BASE_URL` override is needed.
+6. **Verified:** The public site shows the shared cloud demo and loads its sample data through the Worker.
 
-Wrangler may request Cloudflare CLI sign-in the first time it is used. This is separate from browser sign-in. Do not enter or expose any API token in chat or source files. Retell secrets stay unset until the Retell account is active and a dedicated test number is chosen. Example local secret names are in `apps/worker/.dev.vars.example`.
+The Supabase secret is already stored in Cloudflare Production; never put it in GitHub or the website. The Retell webhook-signing key is also stored as an encrypted Cloudflare Production secret. Do not expose either key in chat or source files. The worker's test-number allowlist is still empty, so Retell calls cannot run its tools. Example local secret names are in `apps/worker/.dev.vars.example`.
 
 ## Step 3 — Voice setup (later)
 
@@ -37,7 +37,7 @@ Only after Retell service is active and the owner selects the market/test number
 4. Add only the owner's test numbers to the Worker's allowlist. Set short call-duration and daily limits in Retell.
 5. Do not enable call recording, transcripts, or public inbound access for the sample demo.
 
-The observed Retell account status is an external prerequisite. This repository does not pay a balance, buy a number, or enable billing.
+The Retell workspace currently shows an overdue balance and service deactivation. The account owner must restore the service and choose one pilot country/number before live calls can be configured. This repository does not pay a balance, buy a number, or enable billing. Until then, calls remain off and the test-number allowlist stays empty.
 
 ## Step 4 — Text reminders (later)
 

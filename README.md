@@ -9,8 +9,8 @@ A low-cost portfolio demo for an AI healthcare front desk. It focuses on adminis
 - The browser demo works with fictional appointments, staff tasks, referral status, approved FAQs, and simulated call/SMS workflows.
 - Booking adds a simulated confirmation, 24-hour appointment reminder, and (when a sample referral is missing) 48-hour follow-up. Rescheduling or completing documents updates the sample queue.
 - Market and timezone controls cover USA, UAE, Europe, and India. English is the initial language.
-- Healthcare uses its own Supabase project and private schema, separate from HVAC. The schema migration is applied and verified: it creates 3 private tables and 5 server-only functions without changing HVAC's `public.sessions` table. Cloudflare still runs the older D1 deployment; the Supabase Worker secret and code deployment are pending.
-- Retell tool contracts are prepared, but live calling is off. Calls and texts are simulated in this demo.
+- Healthcare uses its own Supabase project and private schema, separate from HVAC. The migration creates 3 private tables and 5 server-only functions without changing HVAC's `public.sessions` table. The Cloudflare Worker is deployed against Supabase, and its health endpoint confirms the database connection.
+- The Retell webhook-signing key is stored as an encrypted Production secret in Cloudflare, and signed tool routes are implemented. Live calls remain off: the Retell workspace is deactivated due to an overdue balance, and no test phone number is allowlisted.
 - Texts and reminders are simulated only. No SMS provider is connected and no text is sent.
 - No real patient data, uploaded file contents, phone calls, or texts are used by this public demo.
 
