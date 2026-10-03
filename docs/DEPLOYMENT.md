@@ -4,7 +4,7 @@
 
 - The public React website is hosted on GitHub Pages: `https://parshvak26.github.io/ai-healthcare-front-desk/`.
 - GitHub Actions builds the website from `main`. It uses the `VITE_API_BASE_URL` repository variable when set, with the demo Worker URL as a default.
-- Healthcare uses a separate restored Supabase free project, keeping its service key separate from HVAC. Worker source targets protected RPC functions; the schema migration and Cloudflare secret/deployment still need to be completed there. The old D1 migration is retained as history.
+- Healthcare uses a separate Supabase free project, keeping its service key separate from HVAC. Worker source targets protected RPC functions; the private schema migration is applied and verified. Cloudflare still runs the older D1 deployment until its Supabase secret is set and the Worker is redeployed. The old D1 migration is retained as history.
 - The Cloudflare Worker API is deployed at `https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev`. It uses synthetic data, simulates reminders, and accepts Retell events only from configured test numbers.
 - Cloudflare persisted observability logs and preview URLs are disabled in the Worker configuration to keep the demo small and avoid unnecessary public preview endpoints. Use `wrangler tail` for temporary diagnostics when needed.
 - Retell live calling is off. The signed-in workspace currently reports the service as deactivated, so calls cannot be tested until that account state changes.
@@ -18,7 +18,7 @@ The `Build and deploy demo website` workflow installs the locked dependencies, b
 
 Use the separate Supabase project for healthcare; do not put the healthcare key in the HVAC Worker. The browser never connects to Supabase; only the Worker holds the server-side key. Access uses service-role-only RPC functions, so the private schema does not need to be exposed through the public API.
 
-1. Apply `supabase/migrations/20261003000100_healthcare_demo_backend.sql` in the healthcare Supabase project's SQL Editor. It creates only the private `healthcare` schema and its tables/functions.
+1. **Done:** `supabase/migrations/20261003000100_healthcare_demo_backend.sql` has been applied in the healthcare Supabase project's SQL Editor. It creates only the private `healthcare` schema and its tables/functions.
 2. Store the Supabase server-side secret key in Cloudflare Worker secrets as `SUPABASE_SECRET_KEY`. Do not add it to GitHub or the website.
 3. Run `npm run deploy:api` to publish `ai-healthcare-front-desk-api` from `wrangler.toml`.
 4. Open the Worker URL plus `/api/health`. Confirm it reports `synthetic-demo`, the database is connected, and live calls and live SMS are disabled.
