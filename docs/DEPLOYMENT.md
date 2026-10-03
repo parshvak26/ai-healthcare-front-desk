@@ -3,9 +3,10 @@
 ## Current state
 
 - The public React website is hosted on GitHub Pages: `https://parshvak26.github.io/ai-healthcare-front-desk/`.
-- GitHub Actions builds the website from `main`. It reads the optional `VITE_API_BASE_URL` repository variable; leave it empty until the API and database are deployed.
-- A separate Cloudflare D1 database named `ai-healthcare-front-desk-demo` has been created for this project. Its schema is applied from `cloudflare/migrations/`.
-- The Cloudflare Worker API, synthetic-data checks, reminder simulation, and Retell tool definitions are in this repository. The API still needs its first migration and deployment.
+- GitHub Actions builds the website from `main`. It uses the `VITE_API_BASE_URL` repository variable when set, with the demo Worker URL as a default.
+- A separate Cloudflare D1 database named `ai-healthcare-front-desk-demo` has been created for this project. Its schema is defined in `cloudflare/migrations/` and applied to the demo database.
+- The Cloudflare Worker API is deployed at `https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev`. It uses synthetic data, simulates reminders, and accepts Retell events only from configured test numbers.
+- Cloudflare persisted observability logs and preview URLs are disabled in the Worker configuration to keep the demo small and avoid unnecessary public preview endpoints. Use `wrangler tail` for temporary diagnostics when needed.
 - Retell live calling is off. The signed-in workspace currently reports the service as deactivated, so calls cannot be tested until that account state changes.
 - SMS is mock-only. The Worker does not call an SMS provider, and the reminder job only updates fictional message records.
 
@@ -17,10 +18,10 @@ The `Build and deploy demo website` workflow installs the locked dependencies, b
 
 The demo database is separate from HVAC. The browser never connects to D1; only the Worker does. D1 is attached as the Worker's `DB` binding, so it needs no database URL or password secret.
 
-1. From the repository folder, run `npm run migrate:db:remote` to create the demo tables in the project's D1 database.
+1. For a fresh database, run `npm run migrate:db:remote` to create the demo tables from `cloudflare/migrations/`.
 2. Run `npm run deploy:api` to publish `ai-healthcare-front-desk-api` from `wrangler.toml`.
-3. Open the Worker URL plus `/api/health`. Confirm it reports `synthetic-demo` and says live calls and live SMS are disabled.
-4. Add a GitHub repository **variable** named `VITE_API_BASE_URL` containing the Worker URL (without a trailing slash). Run the Pages workflow again so the website connects to the Worker.
+3. Open the Worker URL plus `/api/health`. Confirm it reports `synthetic-demo`, the database is connected, and live calls and live SMS are disabled.
+4. The website workflow defaults to the Worker URL. Set the optional GitHub repository **variable** `VITE_API_BASE_URL` only if you change the API host, then rerun the Pages workflow.
 5. Reload the public site and confirm the header shows that the shared cloud demo is connected.
 
 Wrangler may request Cloudflare CLI sign-in the first time it is used. This is separate from browser sign-in. Do not enter or expose any API token in chat or source files. Retell secrets stay unset until the Retell account is active and a dedicated test number is chosen. Example local secret names are in `apps/worker/.dev.vars.example`.
