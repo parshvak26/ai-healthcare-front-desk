@@ -1,0 +1,88 @@
+{
+  "note": "Create these as Retell custom functions with Payload: args only turned off. Point all URLs at https://<worker-subdomain>.workers.dev/webhooks/retell/custom-function and use POST. The Worker verifies Retell's X-Retell-Signature header with the server-side RETELL_API_KEY secret; do not add or expose an API key in a custom header. Configure the Retell API key that signs webhooks in the Worker secret, and allowlist only the owner's test numbers. Keep retries disabled until idempotency is confirmed in the live workspace.",
+  "functions": [
+    {
+      "name": "get_availability",
+      "description": "Check fictional appointment openings. Use only after the caller picks a date and appointment type. Never invent available times.",
+      "parameters": {
+        "type": "object",
+        "required": ["date", "appointment_type", "timezone"],
+        "properties": {
+          "date": { "type": "string", "description": "Local clinic date in YYYY-MM-DD format." },
+          "appointment_type": { "type": "string", "enum": ["New patient visit", "Follow-up visit", "Consultation", "Administrative call"] },
+          "timezone": { "type": "string", "description": "IANA clinic timezone, for example America/Chicago or Asia/Kolkata." }
+        }
+      }
+    },
+    {
+      "name": "create_appointment",
+      "description": "Book a fictional appointment only after the caller confirms one returned open slot. Use one of the sample names only.",
+      "parameters": {
+        "type": "object",
+        "required": ["patient_name", "appointment_type", "start_at", "timezone"],
+        "properties": {
+          "patient_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] },
+          "appointment_type": { "type": "string", "enum": ["New patient visit", "Follow-up visit", "Consultation", "Administrative call"] },
+          "start_at": { "type": "string", "description": "UTC ISO-8601 instant returned by get_availability." },
+          "timezone": { "type": "string", "description": "IANA clinic timezone." }
+        }
+      }
+    },
+    {
+      "name": "reschedule_appointment",
+      "description": "Move a fictional appointment only after matching its sample reference and sample name, checking new availability, and receiving the caller's confirmation.",
+      "parameters": {
+        "type": "object",
+        "required": ["booking_reference", "verification_name", "new_start_at", "timezone"],
+        "properties": {
+          "booking_reference": { "type": "string", "pattern": "^DEMO-[0-9]{4}$" },
+          "verification_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] },
+          "new_start_at": { "type": "string", "description": "UTC ISO-8601 instant returned by get_availability." },
+          "timezone": { "type": "string", "description": "IANA clinic timezone." }
+        }
+      }
+    },
+    {
+      "name": "cancel_appointment",
+      "description": "Cancel a fictional appointment only after matching the sample reference and sample name, then confirming the cancellation with the caller.",
+      "parameters": {
+        "type": "object",
+        "required": ["booking_reference", "verification_name"],
+        "properties": {
+          "booking_reference": { "type": "string", "pattern": "^DEMO-[0-9]{4}$" },
+          "verification_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] }
+        }
+      }
+    },
+    {
+      "name": "search_approved_faq",
+      "description": "Find an approved front-desk answer. For symptoms, diagnosis, emergencies, or medicine questions, the server returns the approved safety response and a human handoff.",
+      "parameters": {
+        "type": "object",
+        "required": ["question"],
+        "properties": { "question": { "type": "string", "maxLength": 140 } }
+      }
+    },
+    {
+      "name": "request_staff_followup",
+      "description": "Create a minimal sample staff task for a callback, refill request, records request, billing question, document question, or unanswered FAQ. Do not include the caller's free-text details.",
+      "parameters": {
+        "type": "object",
+        "required": ["request_type"],
+        "properties": { "request_type": { "type": "string", "enum": ["callback", "refill", "records", "billing", "documents", "faq"] } }
+      }
+    },
+    {
+      "name": "check_document_status",
+      "description": "Read the status of sample referral documents using a sample booking reference and sample patient name.",
+      "parameters": {
+        "type": "object",
+        "required": ["booking_reference", "sample_patient_name"],
+        "properties": {
+          "booking_reference": { "type": "string", "pattern": "^DEMO-[0-9]{4}$" },
+          "sample_patient_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] }
+        }
+      }
+    }
+  ]
+}

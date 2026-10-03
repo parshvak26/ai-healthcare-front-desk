@@ -135,8 +135,8 @@
     {
       "id": "database",
       "type": "database",
-      "label": "Supabase",
-      "sublabel": "Demo records \u00b7 private files",
+      "label": "Cloudflare D1",
+      "sublabel": "Synthetic demo state",
       "pos": [
         1080,
         330

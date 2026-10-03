@@ -1,8 +1,8 @@
 
 # AI Healthcare Front Desk — Architecture
 
-**Status:** Draft for review  
-**Version:** 0.1  
+**Status:** Implementation architecture
+**Version:** 0.2
 **Date:** 2026-10-03  
 **Scope:** Architecture for the demo described in PRD.md. This is not a production clinical system.
 
@@ -17,9 +17,9 @@
 - Make retries safe and keep all externally visible actions auditable.
 - Avoid paid services until the local demo is useful; put budgets and feature flags around real calls and texts.
 
-## 2. Proposed system view
+## 2. System view
 
-An explorable diagram of the planned system is available at [architecture-diagram.html](architecture-diagram.html). It distinguishes the local mock demo from future provider connections.
+An explorable diagram is available at [architecture-diagram.html](architecture-diagram.html). The diagram shows the target system; the current build status below marks which parts are connected.
 
 ```mermaid
 flowchart LR
@@ -30,14 +30,23 @@ flowchart LR
   W --> SVC[Front desk workflows]
   SVC --> SCH[Demo scheduler adapter]
   SVC --> FAQ[Approved FAQ service]
-  SVC --> DOC[Private demo document storage]
-  SVC --> DB[(Supabase demo database)]
-  W --> SMS[SMS provider adapter]
-  SMS --> P
+  SVC --> DOC[Sample document checklist]
+  SVC --> DB[(Cloudflare D1 demo database)]
+  W --> MSG[Simulated message queue]
   STAFF[Front desk staff] --> UI
 ```
 
-The Retell agent is a conversation channel. It calls the same Worker operations used by the web console. It cannot write directly to the database or invent appointments. The Worker validates every requested operation and returns only the result needed for the next conversation turn.
+The Retell agent is a conversation channel. Its custom-function tools are implemented in the Worker, but live Retell calls are not active. Texts and reminders are simulated; no SMS provider is connected. The Worker validates demo records and never provides clinical decisions.
+
+### Current implementation
+
+- The React staff console works with fictional sample appointments, FAQs, document statuses, tasks, and messages.
+- If `VITE_API_BASE_URL` is empty, browser state stays in local storage. If set, the console loads and saves a shared synthetic demo snapshot through the Worker.
+- The Worker contains routes for state sync, FAQ search, appointment availability, and staff follow-up tasks, plus signed Retell custom-function and call-event endpoints.
+- The Worker uses a separate Cloudflare D1 database. The D1 schema is in `cloudflare/migrations/` and the database is attached only to the Worker.
+- The Worker cron task marks due simulated messages as `Delivered (demo)`; it never sends a text.
+- Referral/document handling is a sample checklist and status change. No file upload, private file bucket, OCR, or real record is stored.
+- Live Retell service is currently deactivated in the signed-in workspace. Voice calls and SMS remain off.
 
 ## 3. Hosting and initial stack
 
@@ -46,11 +55,11 @@ The Retell agent is a conversation channel. It calls the same Worker operations 
 | Public web UI | React, Vite, TypeScript; GitHub Pages | Matches HVAC, static build, low hosting cost. Public source/site is intended for a portfolio demo with synthetic data. |
 | CI and web deploy | GitHub Actions workflow on main and manual dispatch | Runs project checks, builds the UI, then deploys the static artifact, like HVAC. |
 | Private API | Cloudflare Worker with TypeScript and Wrangler | Matches HVAC; holds API secrets, receives provider webhooks, and runs scheduled reminder checks. |
-| Demo database | Separate Supabase project, PostgreSQL, SQL migrations, row-level security | Keeps this project isolated from HVAC and supports appointments, tasks, and status history. |
-| Demo file storage | Private Supabase Storage bucket | Allows synthetic sample documents and private staff-only access through Worker endpoints. |
+| Demo database | Cloudflare D1 | Separate synthetic demo database with no database password to manage. |
+| Demo file storage | Not connected | The current public demo stores sample document status only; it does not upload files. |
 | Voice | Retell inbound phone agent | Uses the existing voice-agent provider and webhook pattern. |
 | SMS | SmsProvider interface, provider selected after first pilot country is chosen | Avoids assuming one phone/SMS provider works in all named markets or has the lowest cost. Live sends are restricted to approved tester numbers. |
-| Local development | Mock scheduler, mock Retell, mock SMS, local in-memory storage or local Supabase | No external account or call/text charge needed while building. |
+| Local development | Mock scheduler, mock Retell, mock SMS, Wrangler's local D1 database | No external account or call/text charge needed while building. |
 
 ### Important hosting boundary
 
@@ -60,7 +69,7 @@ GitHub Pages is for the static portfolio/demo UI, not the private API or a comme
 
 ### Web application
 - Shows public demo, staff console, fake appointments, FAQ editor, task queue, document status, and message outcomes.
-- Owns no Retell key, Supabase service key, SMS credential, or storage secret.
+- Owns no Retell key, SMS credential, or storage secret.
 - Sends requests to the Worker using public API routes.
 - Formats timestamps with market locale and selected display timezone.
 - Never fetches database tables directly.
@@ -71,21 +80,19 @@ Suggested packages and folders:
 apps/web/              React and Vite UI
 apps/worker/           Cloudflare Worker, HTTP routes, webhooks, scheduled job
 packages/shared/       Shared request/response schemas and public types
-supabase/migrations/   Versioned schema and restricted database functions
-supabase/seed/         Synthetic clinic, FAQ, schedule, and sample data
+  cloudflare/migrations/ Versioned D1 schema migrations
+  packages/shared/       Shared API and state types
 retell/                Voice-agent prompt, tools, and setup notes
 docs/                  PRD, architecture, local setup, deployment, safety, FAQ
 ```
 
 ### Worker API
-- Parses and validates all requests.
-- Enforces clinic hours, timezone conversions, slot availability, booking rules, consent, test-number allowlist, rate limits, and message caps.
-- Calls repository interfaces and provider adapters.
-- Verifies Retell webhook signatures and rejects stale or repeated events.
-- Redacts sensitive fields in logs.
-- Uses stable request identifiers and idempotency keys for scheduling and messaging.
-- Runs scheduled reminder/follow-up checks.
-- Returns safe error categories and never exposes raw provider errors or private identifiers.
+- Parses and validates requests, checks synthetic names and references, checks timezone validity, and rate-limits public demo routes.
+- Provides sample availability and Retell tool operations for booking, rescheduling, cancellation, FAQ lookup, document status, and staff follow-up.
+- Verifies Retell webhook signatures and restricts voice actions to configured test numbers.
+- Saves a bounded synthetic snapshot using revision checks. The browser never receives database credentials.
+- Runs a scheduled job that updates sample reminder status only.
+- Returns generic error messages rather than provider response details.
 
 ### Front desk domain services
 - AppointmentService: availability, create, confirm, reschedule, cancel, waitlist.
@@ -136,7 +143,7 @@ Provider creation is controlled by explicit environment modes, such as VOICE_MOD
 
 ### 5.3 Reminder and follow-up job
 
-The current browser demo creates simulated message records: a booking confirmation, a 24-hour appointment reminder, and a missing-document follow-up scheduled 48 hours after booking. Rescheduling updates the reminder; cancelling an appointment or receiving the sample document cancels the corresponding simulated follow-up. These records never leave local browser storage.
+The demo creates simulated message records: a booking confirmation, a 24-hour appointment reminder, and a missing-document follow-up scheduled 48 hours after booking. Rescheduling updates the appointment reminder; cancelling an appointment or receiving the sample document cancels the corresponding simulated follow-up. With no API URL configured, records stay in the browser. When the Worker is configured, the synthetic snapshot is shared through the database. Messages remain simulations in either mode.
 
 For the later connected version:
 
@@ -150,16 +157,9 @@ For the later connected version:
 
 Cron expressions are stored in UTC; business decisions use the configured clinic timezone.
 
-### 5.4 Referral and document intake
+### 5.4 Referral and document checklist
 
-1. Worker returns only the checklist for the selected appointment type.
-2. Browser uploads a file through an authenticated, short-lived upload token or Worker-proxied route.
-3. Worker checks allowlisted file types, size, opaque document ID, and demo upload mode.
-4. Object is stored in a private bucket; browser receives no public object URL.
-5. Database stores an opaque object key, MIME type, size, timestamp, and status, not extracted medical meaning.
-6. Staff marks received/incomplete; this updates the follow-up queue.
-7. Scheduled cleanup deletes demo files and metadata per configured retention.
-8. OCR/AI extraction is out of the first demo scope. If added later, it must be administrative metadata extraction only and reviewed by staff.
+The current build uses sample names, document labels, and receipt-status changes. It does not accept or retain file contents. Private uploads, deletion schedules, and OCR are later work and must remain limited to synthetic test files if added.
 
 ### 5.5 FAQ and human handoff
 
@@ -199,7 +199,7 @@ Every row is scoped to a clinic. A tenant_id field prepares the model for more t
 - Do not store full payment card data, government identity numbers, insurance member numbers, diagnoses, or clinical notes.
 - Never store audio by default. Keep call summary fields short, factual, and administrative.
 - Use a private storage bucket, short-lived upload tokens, strict size/type limits, and scheduled deletion.
-- Row Level Security is enabled. Browser roles have no direct access to private tables. Only the Worker has the server credential.
+- D1 has no public browser credential. The Worker is the only application client, and the D1 binding is private to that Worker.
 - Public API responses use opaque IDs and omit private contact, storage, and provider identifiers.
 - Local development uses non-production credentials and fake providers.
 
@@ -226,24 +226,17 @@ All market-specific templates are configuration data, not prompt code.
 
 ## 8. API and event contracts
 
-Example routes; exact names can change while implementing:
+Implemented routes in the current Worker:
 
-- GET /api/demo/config
-- GET /api/demo/appointments
+- GET /api/health
+- GET /api/demo/state and PUT /api/demo/state
+- GET /api/faqs
 - POST /api/appointments/availability
-- POST /api/appointments
-- POST /api/appointments/:id/reschedule
-- POST /api/appointments/:id/cancel
-- POST /api/waitlist
-- GET /api/faqs?locale=
-- POST /api/handoffs
-- GET /api/tasks
-- POST /api/documents/upload-token
-- POST /api/documents/complete
-- GET /api/documents/:id/status
-- GET /api/demo/messages
-- POST /webhooks/retell
-- POST /webhooks/sms-provider (only if delivery receipts require it)
+- POST /api/tasks
+- POST /webhooks/retell/custom-function
+- POST /webhooks/retell/events
+
+Waitlists, file upload, SMS-provider webhooks, user authentication, and real clinic administration are not implemented.
 
 Voice tool requests use shared typed schemas, strict allowlists, size limits, and request IDs. Webhooks verify provider signatures against the raw request body, reject replays, and acknowledge promptly. Inbound message routes must first apply STOP/opt-out handling before ordinary intent processing.
 
@@ -259,14 +252,14 @@ For this demo:
 - Record explicit opt-in for each non-essential reminder channel. Support STOP and equivalent provider opt-out handling.
 - Secrets live in local ignored files or Cloudflare secrets, never in Vite public variables or GitHub source.
 - Logs include opaque IDs, status, duration, and error class only; do not log phone, message body, file name, transcript, or attachment URL.
-- Use separate Supabase and Cloudflare resources from HVAC to isolate credentials and data.
+- Use separate Cloudflare resources from HVAC to isolate demo data.
 - Production patient data, real clinics, legal notices, BAA/DPA, residency, retention, access management, backup, incident response, and compliance validation are explicitly outside this demo architecture.
 
 ## 10. Reliability and observability
 
 - Structured, privacy-minimized Worker logs with request/correlation IDs.
 - Idempotency on booking writes, webhook application, reminder creation, and send attempts.
-- Unique database constraints prevent slot conflicts and duplicate reminders.
+- Snapshot revision checks reject stale concurrent writes; the API checks demo appointments for conflicting provider times.
 - Outbox pattern stores intended messages before sending; delivery status is separate from appointment status.
 - Retry transient provider failures with capped backoff; do not retry permanent rejections indefinitely.
 - Staff task is created when an action cannot be safely completed.
@@ -283,33 +276,29 @@ ai-healthcare-front-desk/
   apps/web/
   apps/worker/
   packages/shared/
-  supabase/migrations/
-  supabase/seed/
+  cloudflare/migrations/
   retell/
   docs/PRD.md
   docs/ARCHITECTURE.md
   docs/LOCAL_SETUP.md
   docs/DEPLOYMENT.md
-  docs/SECURITY_AND_DEMO_BOUNDARIES.md
   .github/workflows/deploy-web.yml
 ```
 
 Deployment follows HVAC:
 
-1. The current GitHub Actions workflow installs locked dependencies and builds the static website.
-2. It deploys only the static web artifact to GitHub Pages.
-3. The next backend phase adds a Cloudflare Worker and Supabase migrations. Worker deployment remains a separate manual step, so a UI update cannot unexpectedly change the phone service.
-4. Retell and SMS credentials are configured only after the backend, country, test-number allowlist, and setup guide are ready.
-5. Local defaults remain fake providers and browser storage, with no outbound phone or SMS.
+1. GitHub Actions installs locked dependencies and deploys only the website to GitHub Pages.
+2. The Worker and database migration are included in this repository but are deployed separately.
+3. Retell credentials and the test-number allowlist remain unset until its account is active and the selected market is confirmed.
+4. SMS has no provider; local and cloud reminder flows are simulations.
 
 ## 12. Cost plan
 
-At the time this draft was prepared, official pricing pages list:
+Current public pricing pages list:
 
 - GitHub Pages availability for public repositories on GitHub Free. Pages has a documented usage boundary and is not intended for commercial SaaS. See https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits
-- Cloudflare Workers Free includes 100,000 requests per day, with limited CPU per invocation; paid Workers starts at $5/month. See https://developers.cloudflare.com/workers/platform/pricing/
-- Supabase Free costs $0, includes 500 MB database and 1 GB storage, and may pause after a week of inactivity. See https://supabase.com/pricing
-- Retell voice is usage-based and currently lists $0.07–$0.31/minute; phone-number and SMS fees depend on telephony setup. See https://www.retellai.com/pricing
+- Cloudflare Workers Free includes 100,000 requests per day; D1 Free includes 5 million rows read/day, 100,000 rows written/day, and 5 GB total storage. See [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
+- Retell currently lists voice AI at $0.07–$0.31/minute; phone-number and SMS costs depend on the telephony setup. See [Retell pricing](https://www.retellai.com/pricing).
 
 Cost controls:
 
@@ -325,7 +314,7 @@ Cost controls:
 ### Proposed decisions
 - Separate repo and separate cloud resources from HVAC.
 - Public code and static demo site, synthetic seed data.
-- React/Vite/TypeScript + Cloudflare Worker + Supabase + Retell, consistent with HVAC.
+- React/Vite/TypeScript + Cloudflare Worker + D1 + Retell, following the HVAC hosting pattern.
 - Demo scheduler as first backend, no EHR.
 - Mock external services as the local default.
 - Appointment confirmation, 24-hour reminder, and missing-document follow-up at 48 hours.
@@ -333,8 +322,8 @@ Cost controls:
 - English first across the selected markets.
 - Clinic scheduling timezone and viewer display timezone are separate controls.
 - Any live calls or texts must be restricted to the owner's approved test numbers.
-- Booking confirmation, 24-hour appointment reminder, and a 48-hour missing-document follow-up.
-- The first public version uses demo data and does not connect external providers.
+- Booking confirmation, 24-hour appointment reminder, and a missing-document follow-up 48 hours after booking.
+- The public UI uses demo data. The D1 database exists and the Worker migration/deployment remain to be applied; live voice and SMS are not enabled.
 
 ### Open for the later live phase
 - Which countries belong under the Europe market option.
@@ -343,7 +332,7 @@ Cost controls:
 - Whether to allow synthetic file uploads in the public demo. The current demo tracks sample document status only and has no file upload.
 - Recording/transcript policy and retention period for any live test contact data. Recording remains off by default.
 - Whether a real EHR connection is in scope later, and which vendor if so.
-- Confirm the public GitHub repository slug before creating the remote. The local project folder is `ai-healthcare-front-desk`.
+- The public repository is `parshvak26/ai-healthcare-front-desk`; the local project folder is `ai-healthcare-front-desk`.
 
 ## 14. References
 
@@ -351,6 +340,5 @@ Cost controls:
 - GitHub Pages limits: https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits
 - Cloudflare Workers pricing: https://developers.cloudflare.com/workers/platform/pricing/
 - Cloudflare Cron Triggers: https://developers.cloudflare.com/workers/configuration/cron-triggers/
-- Supabase pricing: https://supabase.com/pricing
 - Retell pricing: https://www.retellai.com/pricing
 - Retell telephony setup docs: https://docs.retellai.com/

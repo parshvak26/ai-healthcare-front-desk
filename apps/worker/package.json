@@ -1,0 +1,16 @@
+{
+  "name": "@healthcare-front-desk/worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --config ../../wrangler.toml",
+    "deploy": "wrangler deploy --config ../../wrangler.toml",
+    "db:migrate:local": "wrangler d1 migrations apply ai-healthcare-front-desk-demo --local --config ../../wrangler.toml",
+    "db:migrate:remote": "wrangler d1 migrations apply ai-healthcare-front-desk-demo --remote --config ../../wrangler.toml",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

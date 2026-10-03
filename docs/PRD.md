@@ -251,7 +251,7 @@ Review this PRD and architecture, settle market/language/test-number choices, th
 Build the web console, fake clinic/scheduler, sample FAQs, synthetic appointments, document checklist, local message/call adapters, and complete admin workflows. No external account required.
 
 ### Phase 2 — cloud demo
-Create separate Cloudflare Worker and Supabase resources; deploy the static UI through GitHub Actions; seed synthetic data; add a scheduled reminder job. Keep real provider modes off.
+Create a separate Cloudflare Worker and D1 database; deploy the static UI through GitHub Actions; seed synthetic data; add a scheduled reminder job. Keep real provider modes off.
 
 ### Phase 3 — live voice pilot
 Configure a Retell inbound agent and one test number in one chosen market. Enable only approved test numbers, short calls, limited daily usage, and minimal call data retention.
@@ -272,7 +272,6 @@ Choose EHR/scheduler, phone/SMS vendors, data-region requirements, access model,
 3. Should document upload accept only supplied synthetic examples, or arbitrary test files? Recommendation: synthetic examples only for public use.
 4. What call-recording/transcript retention is acceptable? Recommendation: recording off; store only a short admin summary and delete it after a short configured period.
 5. Which country should be the first live voice/SMS pilot? The owner named four markets; live provider cost and number availability should be checked per country.
-6. Confirm the proposed repo slug: ai-healthcare-front-desk.
 
 ## 11. Glossary
 

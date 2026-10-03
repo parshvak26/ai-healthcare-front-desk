@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { faqEntries } from "./lib/demoData";
+import { apiBaseUrl, getRemoteDemoState, putRemoteDemoState, RemoteStateConflict } from "./lib/api";
 import { loadDemoState, resetDemoState, saveDemoState } from "./lib/store";
 import { addLocalDays, allTimezones, defaultLocalDateTime, formatDate, formatDateTime, formatTime, localDateTimeToUtc, marketTimezones, timezoneLabel } from "./lib/timezone";
 import type { Appointment, DemoState, FollowUpTask, Market } from "./types";
@@ -21,6 +22,11 @@ const pages: { name: Page; icon: string; group?: string }[] = [
 const marketNames: Market[] = ["USA", "UAE", "Europe", "India"];
 const demoPatients = ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"];
 const appointmentTypes = ["New patient visit", "Follow-up visit", "Consultation", "Administrative call"];
+const serviceDurations: Record<string, number> = { "New patient visit": 60, "Follow-up visit": 30, Consultation: 45, "Administrative call": 15 };
+const demoProviders = [
+  { name: "Dr. Avery Chen", location: "Main clinic" },
+  { name: "Dr. Noah Rivera", location: "North clinic" },
+];
 
 function id(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
@@ -51,8 +57,72 @@ function taskTone(priority: FollowUpTask["priority"]): "amber" | "red" | "neutra
   return "neutral";
 }
 
+function isDemoSlotOpen(startAt: string, appointmentType: string, timezone: string) {
+  const duration = serviceDurations[appointmentType];
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone, weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date(startAt));
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const hour = Number(values.hour);
+  const minute = Number(values.minute);
+  return Boolean(duration && ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(values.weekday)
+    && minute % 30 === 0 && hour * 60 + minute >= 8 * 60
+    && hour * 60 + minute + duration <= 17 * 60 && Date.parse(startAt) > Date.now());
+}
+
+function providerForSlot(appointments: Appointment[], startAt: string, appointmentType: string, ignoreId?: string) {
+  const start = Date.parse(startAt);
+  const end = start + (serviceDurations[appointmentType] || 30) * 60_000;
+  return demoProviders.find((provider) => !appointments.some((item) => {
+    if (item.id === ignoreId || item.status === "Cancelled" || item.provider !== provider.name) return false;
+    const itemStart = Date.parse(item.startAt);
+    const itemEnd = itemStart + (serviceDurations[item.type] || 30) * 60_000;
+    return start < itemEnd && itemStart < end;
+  }));
+}
+
+function localMorningOnSameDay(value: string, timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date(value));
+  const date = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return localDateTimeToUtc(`${date.year}-${date.month}-${date.day}T10:00`, timezone);
+}
+
+function mergeRows<T extends { id: string }>(base: T[], local: T[], remote: T[]) {
+  const baseById = new Map(base.map((item) => [item.id, item]));
+  const localById = new Map(local.map((item) => [item.id, item]));
+  const remoteById = new Map(remote.map((item) => [item.id, item]));
+  const merged = new Map(remoteById);
+  for (const id of baseById.keys()) if (!localById.has(id)) merged.delete(id);
+  for (const [id, item] of localById) {
+    const before = baseById.get(id);
+    if (!before || JSON.stringify(before) !== JSON.stringify(item)) merged.set(id, item);
+  }
+  return [
+    ...local.map((item) => merged.get(item.id)).filter((item): item is T => Boolean(item)),
+    ...remote.filter((item) => !localById.has(item.id)).map((item) => merged.get(item.id)).filter((item): item is T => Boolean(item)),
+  ];
+}
+
+function mergeDemoState(base: DemoState, local: DemoState, remote: DemoState): DemoState {
+  return {
+    appointments: mergeRows(base.appointments, local.appointments, remote.appointments),
+    tasks: mergeRows(base.tasks, local.tasks, remote.tasks),
+    referrals: mergeRows(base.referrals, local.referrals, remote.referrals),
+    messages: mergeRows(base.messages, local.messages, remote.messages),
+  };
+}
+
 function App() {
   const [state, setState] = useState<DemoState>(loadDemoState);
+  const [cloudReady, setCloudReady] = useState(!apiBaseUrl);
+  const [cloudStatus, setCloudStatus] = useState(apiBaseUrl ? "connecting" : "local");
+  const cloudRevision = useRef<number | null>(null);
+  const cloudBaseState = useRef<DemoState | null>(null);
+  const latestState = useRef(state);
+  const syncQueue = useRef<Promise<void>>(Promise.resolve());
+  latestState.current = state;
   const [page, setPage] = useState<Page>("Overview");
   const [market, setMarket] = useState<Market>("USA");
   const [clinicTimezone, setClinicTimezone] = useState("America/Chicago");
@@ -62,7 +132,52 @@ function App() {
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
 
-  useEffect(() => saveDemoState(state), [state]);
+  useEffect(() => {
+    if (!apiBaseUrl) return;
+    const controller = new AbortController();
+    getRemoteDemoState(controller.signal).then((snapshot) => {
+      cloudRevision.current = snapshot.revision;
+      cloudBaseState.current = snapshot.state;
+      setState(snapshot.state);
+      setCloudStatus("connected");
+      setCloudReady(true);
+    }).catch(() => {
+      if (controller.signal.aborted) return;
+      setCloudStatus("local");
+      setCloudReady(false);
+    });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    saveDemoState(state);
+    if (!apiBaseUrl || !cloudReady || cloudRevision.current === null) return;
+    const timer = window.setTimeout(() => {
+      setCloudStatus("saving");
+      syncQueue.current = syncQueue.current.catch(() => undefined).then(async () => {
+        const desired = latestState.current;
+        const revision = cloudRevision.current;
+        if (revision === null) return;
+        try {
+          const saved = await putRemoteDemoState({ state: desired, revision });
+          cloudBaseState.current = saved.state;
+          cloudRevision.current = saved.revision;
+        } catch (error) {
+          if (!(error instanceof RemoteStateConflict)) throw error;
+          const remote = await getRemoteDemoState(new AbortController().signal);
+          const localNow = latestState.current;
+          const merged = mergeDemoState(cloudBaseState.current || remote.state, localNow, remote.state);
+          const saved = await putRemoteDemoState({ state: merged, revision: remote.revision });
+          cloudBaseState.current = saved.state;
+          cloudRevision.current = saved.revision;
+          if (JSON.stringify(latestState.current) === JSON.stringify(localNow)
+            && JSON.stringify(merged) !== JSON.stringify(localNow)) setState(merged);
+        }
+        setCloudStatus("connected");
+      }).catch(() => setCloudStatus("sync issue"));
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [state, cloudReady]);
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 3200);
@@ -84,7 +199,7 @@ function App() {
   function addMessage(recipient: string, purpose: string, body: string) {
     setState((current) => ({
       ...current,
-      messages: [{ id: id("msg"), recipient, purpose, body, sentAt: new Date().toISOString(), status: "Queued (demo)" }, ...current.messages],
+      messages: [{ id: id("msg"), recipient, purpose, body, sentAt: new Date().toISOString(), status: "Queued (demo)" as const }, ...current.messages].slice(0, 200),
     }));
   }
 
@@ -94,7 +209,7 @@ function App() {
       dueAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
       priority, status: "Open",
     };
-    setState((current) => ({ ...current, tasks: [task, ...current.tasks] }));
+    setState((current) => ({ ...current, tasks: [task, ...current.tasks].slice(0, 100) }));
     setToast("Added to the staff follow-up queue");
   }
 
@@ -114,41 +229,46 @@ function App() {
       return;
     }
 
-    const collision = state.appointments.some((appointment) => appointment.status !== "Cancelled" && appointment.startAt === startAt);
-    if (collision) {
-      setToast("That time is already taken in the demo schedule");
+    if (!isDemoSlotOpen(startAt, appointmentType, clinicTimezone)) {
+      setToast("Choose a future weekday slot from 8:00 AM to 5:00 PM, in 30-minute steps");
+      return;
+    }
+    const provider = providerForSlot(state.appointments, startAt, appointmentType);
+    if (!provider) {
+      setToast("No sample provider is free at that time");
       return;
     }
 
     const reference = `DEMO-${Math.floor(1000 + Math.random() * 8999)}`;
     const appointment: Appointment = {
       id: id("apt"), patient, reference, type: appointmentType,
-      provider: "Dr. Avery Chen", location: "Main clinic", startAt,
+      provider: provider.name, location: provider.location, startAt,
+      timezone: clinicTimezone,
       status: "Confirmed", documents: appointmentType === "Follow-up visit" ? "Received" : "Needed",
     };
     setState((current) => ({
       ...current,
-      appointments: [appointment, ...current.appointments],
+      appointments: [appointment, ...current.appointments].slice(0, 100),
       referrals: appointment.documents === "Needed" ? [{
         id: id("doc"), patient, reference, appointment: appointmentType,
-        document: "Referral letter · sample needed", status: "Needed",
-      }, ...current.referrals] : current.referrals,
+        document: "Referral letter · sample needed", status: "Needed" as const,
+      }, ...current.referrals].slice(0, 100) : current.referrals,
       tasks: appointment.documents === "Needed" ? [{
         id: id("task"), title: "Referral document missing", patient,
         detail: "Check whether the sample referral has arrived; the 48-hour text remains simulated.",
-        dueAt: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(), priority: "Normal", status: "Open",
-      }, ...current.tasks] : current.tasks,
+        dueAt: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(), priority: "Normal" as const, status: "Open" as const,
+      }, ...current.tasks].slice(0, 100) : current.tasks,
       messages: [
         {
           id: id("msg"), recipient: `${patient} · ${reference}`, purpose: "Booking confirmation",
           body: `Demo appointment confirmed for ${formatDateTime(startAt, clinicTimezone)} (${timezoneLabel(clinicTimezone)}). No text was sent.`,
-          sentAt: new Date().toISOString(), appointmentReference: reference, status: "Queued (demo)",
+          sentAt: new Date().toISOString(), appointmentReference: reference, status: "Queued (demo)" as const,
         },
         {
           id: id("msg"), recipient: `${patient} · ${reference}`, purpose: "24-hour appointment reminder",
           body: `Reminder for your sample appointment at ${formatDateTime(startAt, clinicTimezone)} (${timezoneLabel(clinicTimezone)}). This text is not sent.`,
           sentAt: new Date().toISOString(), scheduledFor: new Date(Math.max(Date.now(), Date.parse(startAt) - 24 * 60 * 60 * 1000)).toISOString(),
-          appointmentReference: reference, status: "Scheduled (demo)",
+          appointmentReference: reference, status: "Scheduled (demo)" as const,
         },
         ...(appointment.documents === "Needed" ? [{
           id: id("msg"), recipient: `${patient} · ${reference}`, purpose: "48-hour missing-document follow-up",
@@ -157,7 +277,7 @@ function App() {
           appointmentReference: reference, status: "Scheduled (demo)" as const,
         }] : []),
         ...current.messages,
-      ],
+      ].slice(0, 200),
     }));
     setShowBooking(false);
     setPage("Appointments");
@@ -168,9 +288,21 @@ function App() {
     const actionLabel = action === "reschedule" ? "move this demo appointment to the next available day" : "cancel this demo appointment";
     if (!window.confirm(`Would you like to ${actionLabel}? This only changes sample data.`)) return;
     let nextStartAt = appointment.startAt;
+    let nextProvider = { name: appointment.provider, location: appointment.location };
     if (action === "reschedule") {
       try {
-        nextStartAt = addLocalDays(appointment.startAt, 1, clinicTimezone);
+        const baseStart = isDemoSlotOpen(appointment.startAt, appointment.type, clinicTimezone)
+          ? appointment.startAt
+          : localMorningOnSameDay(appointment.startAt, clinicTimezone);
+        let found = false;
+        for (let day = 1; day <= 31 && !found; day += 1) {
+          const candidate = addLocalDays(baseStart, day, clinicTimezone);
+          const available = isDemoSlotOpen(candidate, appointment.type, clinicTimezone)
+            ? providerForSlot(state.appointments, candidate, appointment.type, appointment.id)
+            : undefined;
+          if (available) { nextStartAt = candidate; nextProvider = available; found = true; }
+        }
+        if (!found) throw new Error("No sample opening was found in the next month. Choose another time.");
       } catch (error) {
         setToast(error instanceof Error ? error.message : "Choose another time");
         return;
@@ -179,14 +311,12 @@ function App() {
     setState((current) => ({
       ...current,
       appointments: current.appointments.map((item) => item.id === appointment.id
-        ? { ...item, ...(action === "cancel" ? { status: "Cancelled" as const } : { startAt: nextStartAt }) }
+        ? { ...item, ...(action === "cancel" ? { status: "Cancelled" as const } : { startAt: nextStartAt, timezone: clinicTimezone, provider: nextProvider.name, location: nextProvider.location }) }
         : item),
       messages: current.messages.map((message) => {
         if (message.appointmentReference !== appointment.reference || message.status !== "Scheduled (demo)") return message;
         if (action === "cancel") return { ...message, status: "Cancelled (demo)" as const };
-        if (message.purpose === "24-hour appointment reminder") {
-          return { ...message, scheduledFor: new Date(Math.max(Date.now(), Date.parse(nextStartAt) - 24 * 60 * 60 * 1000)).toISOString() };
-        }
+        if (message.purpose === "24-hour appointment reminder") return { ...message, scheduledFor: new Date(Math.max(Date.now(), Date.parse(nextStartAt) - 24 * 60 * 60 * 1000)).toISOString() };
         return message;
       }),
     }));
@@ -289,7 +419,7 @@ function App() {
         <header className="topbar">
           <div className="breadcrumb"><span>Harbor Health</span><span className="crumb-divider">/</span><strong>{page}</strong></div>
           <div className="topbar-actions">
-            <span className="demo-indicator"><span className="online-dot" />DEMO ENVIRONMENT</span>
+            <span className="demo-indicator"><span className="online-dot" />{cloudStatus === "connected" ? "CLOUD DEMO · CALLS OFF" : cloudStatus === "saving" ? "SAVING SAMPLE DATA" : cloudStatus === "sync issue" ? "LOCAL COPY · SYNC ISSUE" : "LOCAL DEMO · CALLS OFF"}</span>
             <button className="icon-button" aria-label="Notifications">♧<i /></button>
             <Avatar name="Owner" size="small" />
           </div>
@@ -334,7 +464,7 @@ function App() {
           {page === "Referrals" && <Referrals state={state} clinicTimezone={clinicTimezone} onMark={markDocument} />}
           {page === "Follow-ups" && <FollowUps tasks={state.tasks} clinicTimezone={clinicTimezone} onUpdate={updateTask} />}
           {page === "Messages" && <Messages state={state} clinicTimezone={clinicTimezone} />}
-          {page === "FAQs" && <Faqs entries={filteredFaqs} search={search} onSearch={setSearch} onAskStaff={(question) => addTask("FAQ needs review", "Front desk", question, "Normal")} />}
+          {page === "FAQs" && <Faqs entries={filteredFaqs} search={search} onSearch={setSearch} onAskStaff={() => addTask("FAQ needs review", "Front desk", "A published demo FAQ was flagged for staff review. No caller text was stored.", "Normal")} />}
           {page === "Settings" && <Settings market={market} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} onReset={resetDemo} />}
 
           <div className="footer-note"><span className="shield-icon">◇</span><span>Fictional demo · Use sample data only · Not for medical advice or real patient information</span><button onClick={() => setPage("Settings")}>Demo settings</button></div>

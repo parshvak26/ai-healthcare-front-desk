@@ -229,3 +229,5 @@ export const faqEntries: FaqEntry[] = [
     updated: "Approved safety response",
   },
 ];
+
+export const allowedDemoPatients = ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] as const;

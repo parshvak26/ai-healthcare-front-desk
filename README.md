@@ -1,16 +1,18 @@
 
 # AI Healthcare Front Desk
 
-A local-first portfolio demo for an AI healthcare front desk. It focuses on administrative work such as appointment scheduling, approved FAQs, referral follow-up, staff requests, and simulated reminders. It does not provide clinical advice.
+A low-cost portfolio demo for an AI healthcare front desk. It focuses on administrative work such as appointment scheduling, approved FAQs, referral follow-up, staff requests, and simulated reminders. It does not provide clinical advice.
 
 ## Current state
 
-- The product requirements and architecture are documented.
+- The product requirements and architecture are documented in `docs/PRD.md` and `docs/ARCHITECTURE.md`.
 - The browser demo works with fictional appointments, staff tasks, referral status, approved FAQs, and simulated call/SMS workflows.
 - Booking adds a simulated confirmation, 24-hour appointment reminder, and (when a sample referral is missing) 48-hour follow-up. Rescheduling or completing documents updates the sample queue.
 - Market and timezone controls cover USA, UAE, Europe, and India. English is the initial language.
-- State stays in this browser's local storage. No real patient data, file contents, phone calls, or texts are sent.
-- Retell, SMS, Cloudflare Worker, and Supabase are not connected yet.
+- A Cloudflare Worker API and D1 migration are included. A separate D1 demo database has been created; its migration and Worker deployment are the remaining cloud setup steps.
+- Retell tool contracts are prepared, but live calling is off. The signed-in Retell workspace currently shows the service as deactivated, so no calls can be placed.
+- Texts and reminders are simulated only. No SMS provider is connected and no text is sent.
+- No real patient data, uploaded file contents, phone calls, or texts are used by this public demo.
 
 ## Run locally
 

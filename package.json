@@ -5,6 +5,11 @@
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "dev": "npm run dev --workspace @healthcare-front-desk/web",
-    "build": "npm run build --workspace @healthcare-front-desk/web"
+    "dev:api": "npm run dev --workspace @healthcare-front-desk/worker",
+    "build": "npm run build --workspace @healthcare-front-desk/web",
+    "typecheck:api": "npm run typecheck --workspace @healthcare-front-desk/worker",
+    "deploy:api": "npm run deploy --workspace @healthcare-front-desk/worker",
+    "migrate:db:local": "npm run db:migrate:local --workspace @healthcare-front-desk/worker",
+    "migrate:db:remote": "npm run db:migrate:remote --workspace @healthcare-front-desk/worker"
   }
 }

@@ -1,28 +1,55 @@
-# Demo website deployment
+# Hosting and low-cost rollout
 
-The current deployment target is a public portfolio demo, following the HVAC project pattern:
+## Current state
 
-- GitHub Pages hosts the static Vite website.
-- GitHub Actions builds and publishes the website from the main branch.
-- The website stores sample changes in each visitor's browser.
-- There is no live API, database, EHR, Retell calling, or SMS connection in this phase.
+- The public React website is hosted on GitHub Pages: `https://parshvak26.github.io/ai-healthcare-front-desk/`.
+- GitHub Actions builds the website from `main`. It reads the optional `VITE_API_BASE_URL` repository variable; leave it empty until the API and database are deployed.
+- A separate Cloudflare D1 database named `ai-healthcare-front-desk-demo` has been created for this project. Its schema is applied from `cloudflare/migrations/`.
+- The Cloudflare Worker API, synthetic-data checks, reminder simulation, and Retell tool definitions are in this repository. The API still needs its first migration and deployment.
+- Retell live calling is off. The signed-in workspace currently reports the service as deactivated, so calls cannot be tested until that account state changes.
+- SMS is mock-only. The Worker does not call an SMS provider, and the reminder job only updates fictional message records.
 
-GitHub Pages on GitHub Free requires a public repository. Pages is appropriate here only as a portfolio/demo website with synthetic data; it is not the production host for a clinic service.
+## Step 1 — Website
 
-## Set up GitHub Pages
+The `Build and deploy demo website` workflow installs the locked dependencies, builds `apps/web`, and publishes it to GitHub Pages. The repository must use the **GitHub Actions** Pages source. The repository is public so Pages works on the free GitHub plan.
 
-1. Create the public repository `ai-healthcare-front-desk` under the owner's GitHub account and push the main branch.
-2. In the repository, open **Settings → Pages**.
-3. Set the source to **GitHub Actions**.
-4. Open **Actions** and run **Build and deploy demo website**, or push a later change to main.
-5. GitHub will show the published project-page address on the Pages settings screen.
+## Step 2 — Private API and database
 
-The workflow computes the repository base path automatically. It runs the production build before publishing and does not need API keys.
+The demo database is separate from HVAC. The browser never connects to D1; only the Worker does. D1 is attached as the Worker's `DB` binding, so it needs no database URL or password secret.
 
-## Live integrations are not enabled
+1. From the repository folder, run `npm run migrate:db:remote` to create the demo tables in the project's D1 database.
+2. Run `npm run deploy:api` to publish `ai-healthcare-front-desk-api` from `wrangler.toml`.
+3. Open the Worker URL plus `/api/health`. Confirm it reports `synthetic-demo` and says live calls and live SMS are disabled.
+4. Add a GitHub repository **variable** named `VITE_API_BASE_URL` containing the Worker URL (without a trailing slash). Run the Pages workflow again so the website connects to the Worker.
+5. Reload the public site and confirm the header shows that the shared cloud demo is connected.
 
-Do not add Retell, SMS, database, or storage credentials to the GitHub Pages workflow. The current site has no server-side API and cannot safely hold those credentials. A later phase will add a Cloudflare Worker and a separate database, then document their manual deployment separately. Live calls and texts will remain disabled until test-number allowlists and usage limits are configured.
+Wrangler may request Cloudflare CLI sign-in the first time it is used. This is separate from browser sign-in. Do not enter or expose any API token in chat or source files. Retell secrets stay unset until the Retell account is active and a dedicated test number is chosen. Example local secret names are in `apps/worker/.dev.vars.example`.
 
-## Production clinic use
+## Step 3 — Voice setup (later)
 
-This public demo is not a production healthcare service. Before using real clinic or patient information, replace the static-demo deployment with a separately reviewed production architecture, choose vendors and data region, and confirm applicable contracts and security controls.
+Only after Retell service is active and the owner selects the market/test number:
+
+1. Create a separate demo agent; do not change the HVAC agent.
+2. Use `retell/AGENT_PROMPT.md` and configure the functions in `retell/tools.json` to call `/webhooks/retell/custom-function`.
+3. Keep Retell's signature header enabled. The Worker checks `X-Retell-Signature` using the server-side API key; never put a key in a custom request header or the web app.
+4. Add only the owner's test numbers to the Worker's allowlist. Set short call-duration and daily limits in Retell.
+5. Do not enable call recording, transcripts, or public inbound access for the sample demo.
+
+The observed Retell account status is an external prerequisite. This repository does not pay a balance, buy a number, or enable billing.
+
+## Step 4 — Text reminders (later)
+
+The app currently records only simulated confirmations, 24-hour appointment reminders, and a missing-document follow-up 48 hours after booking. Live SMS stays off until one market, sender, provider, opt-in wording, opt-out handling, and per-message cost are chosen. Do not enable SMS for all markets based on the demo timezone dropdown alone.
+
+Retell's own A2P SMS add-on for its Twilio numbers is limited to US numbers. Its current published fees are $4 one-time for a low-volume brand or $45 for standard, $15 for the campaign application, then $20/month per number plus $0.01 per text. That makes it a poor fit for a minimal-cost, multi-market reminder system, so the demo does not apply for it. See [Retell's SMS setup and fees](https://docs.retellai.com/deploy/enable-sms).
+
+## Cost approach
+
+- Keep GitHub Pages, Cloudflare Worker, and the demo database on free tiers for synthetic data.
+- Current Cloudflare documentation lists 100,000 Worker requests/day and D1 quotas of 5 million rows read/day and 100,000 rows written/day on Free. [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)
+- Retell lists voice AI at $0.07–$0.31/minute. A call can cost money even when used for testing, so live calls stay disabled until the owner explicitly chooses a budget and test number. [Retell pricing](https://www.retellai.com/pricing)
+- If any dashboard prompts for a paid plan, extra phone number, credit purchase, or paid SMS sender, stop before accepting it.
+
+## Privacy and production boundary
+
+This public portfolio demo contains synthetic data only. Do not enter real patient information, upload real records, or describe this system as compliant for patient care. A real clinic deployment needs its own security review, data-region and vendor selection, contracts, identity/access controls, retention plan, and legal review. GitHub Pages remains the static demo host, not the production clinic service.

@@ -1,0 +1,18 @@
+name = "ai-healthcare-front-desk-api"
+main = "apps/worker/src/index.ts"
+compatibility_date = "2026-10-03"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ai-healthcare-front-desk-demo"
+database_id = "af4e542d-2a1d-4abc-a906-88b396f2cffc"
+migrations_dir = "cloudflare/migrations"
+
+[vars]
+CLINIC_ID = "harbor-health-demo"
+PUBLIC_ORIGINS = "https://parshvak26.github.io,http://localhost:5173"
+SMS_MODE = "mock"
+
+[triggers]
+crons = ["*/15 * * * *"]
