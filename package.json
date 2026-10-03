@@ -1,0 +1,10 @@
+{
+  "name": "ai-healthcare-front-desk",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "npm run dev --workspace @healthcare-front-desk/web",
+    "build": "npm run build --workspace @healthcare-front-desk/web"
+  }
+}

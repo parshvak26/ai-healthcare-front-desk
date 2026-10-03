@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AI Healthcare Front Desk",
+    "output": "architecture-diagram.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "front-desk-flow",
+        "label": "Front desk request",
+        "focus": [
+          "caller",
+          "retell",
+          "worker",
+          "workflows",
+          "database"
+        ],
+        "note": "A caller reaches the approved front-desk workflow and the scheduler remains the source of truth."
+      },
+      {
+        "id": "staff-and-data",
+        "label": "Staff and sample data",
+        "focus": [
+          "staff",
+          "pages",
+          "worker",
+          "workflows",
+          "database"
+        ],
+        "note": "Staff use the demo console to review appointments, referrals, questions, and follow-ups."
+      },
+      {
+        "id": "reminders",
+        "label": "Reminder path",
+        "focus": [
+          "cron",
+          "worker",
+          "workflows",
+          "database",
+          "sms"
+        ],
+        "note": "Scheduled jobs check consent, timezone, and duplicate protection before any message provider is called."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "caller",
+      "type": "external",
+      "label": "Caller",
+      "sublabel": "Approved test number",
+      "pos": [
+        40,
+        260
+      ],
+      "size": [
+        150,
+        66
+      ]
+    },
+    {
+      "id": "staff",
+      "type": "external",
+      "label": "Front desk staff",
+      "sublabel": "Demo workspace",
+      "pos": [
+        40,
+        430
+      ],
+      "size": [
+        150,
+        66
+      ]
+    },
+    {
+      "id": "retell",
+      "type": "external",
+      "label": "Retell voice",
+      "sublabel": "Phone agent",
+      "pos": [
+        270,
+        260
+      ],
+      "size": [
+        160,
+        66
+      ],
+      "tag": "Later connection"
+    },
+    {
+      "id": "pages",
+      "type": "frontend",
+      "label": "GitHub Pages",
+      "sublabel": "Static staff console",
+      "pos": [
+        270,
+        430
+      ],
+      "size": [
+        160,
+        66
+      ],
+      "tag": "Public demo"
+    },
+    {
+      "id": "worker",
+      "type": "cloud",
+      "label": "Cloudflare Worker",
+      "sublabel": "Private API",
+      "pos": [
+        520,
+        330
+      ],
+      "size": [
+        170,
+        70
+      ],
+      "tag": "Secrets stay server-side"
+    },
+    {
+      "id": "workflows",
+      "type": "backend",
+      "label": "Front desk workflows",
+      "sublabel": "Rules \u00b7 approvals \u00b7 audit",
+      "pos": [
+        790,
+        330
+      ],
+      "size": [
+        180,
+        70
+      ]
+    },
+    {
+      "id": "database",
+      "type": "database",
+      "label": "Supabase",
+      "sublabel": "Demo records \u00b7 private files",
+      "pos": [
+        1080,
+        330
+      ],
+      "size": [
+        170,
+        70
+      ],
+      "tag": "Synthetic data"
+    },
+    {
+      "id": "cron",
+      "type": "cloud",
+      "label": "Scheduled job",
+      "sublabel": "24h reminders \u00b7 48h docs",
+      "pos": [
+        520,
+        120
+      ],
+      "size": [
+        170,
+        70
+      ]
+    },
+    {
+      "id": "sms",
+      "type": "external",
+      "label": "SMS provider",
+      "sublabel": "Country chosen later",
+      "pos": [
+        790,
+        120
+      ],
+      "size": [
+        180,
+        70
+      ],
+      "tag": "Test numbers only"
+    }
+  ],
+  "connections": [
+    {
+      "id": "caller-retell",
+      "from": "caller",
+      "to": "retell",
+      "label": "phone call",
+      "variant": "emphasis"
+    },
+    {
+      "id": "retell-worker",
+      "from": "retell",
+      "to": "worker",
+      "label": "approved tool request",
+      "variant": "security",
+      "labelAt": [
+        475,
+        256
+      ]
+    },
+    {
+      "id": "staff-pages",
+      "from": "staff",
+      "to": "pages",
+      "label": "HTTPS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "pages-worker",
+      "from": "pages",
+      "to": "worker",
+      "label": "HTTPS API",
+      "variant": "security"
+    },
+    {
+      "id": "worker-workflows",
+      "from": "worker",
+      "to": "workflows",
+      "label": "validate and route",
+      "labelAt": [
+        740,
+        418
+      ]
+    },
+    {
+      "id": "workflows-database",
+      "from": "workflows",
+      "to": "database",
+      "label": "read / write demo state",
+      "labelAt": [
+        1025,
+        414
+      ]
+    },
+    {
+      "id": "cron-worker",
+      "from": "cron",
+      "to": "worker",
+      "label": "due work",
+      "variant": "dashed",
+      "labelAt": [
+        605,
+        204
+      ]
+    },
+    {
+      "id": "worker-sms",
+      "from": "worker",
+      "to": "sms",
+      "label": "allowlisted messages only",
+      "variant": "security"
+    },
+    {
+      "id": "sms-caller",
+      "from": "sms",
+      "to": "caller",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [
+        [
+          740,
+          155
+        ],
+        [
+          740,
+          80
+        ],
+        [
+          20,
+          80
+        ],
+        [
+          20,
+          293
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Demo first",
+      "items": [
+        "Fictional clinic and scheduler",
+        "Local mock mode costs nothing",
+        "No real patient records or document uploads"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "One trusted rule layer",
+      "items": [
+        "Voice and staff console use the same workflows",
+        "The scheduler confirms every booking",
+        "Missing answers and uncertain requests go to staff"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Live use stays gated",
+      "items": [
+        "Retell and SMS are not connected yet",
+        "Only approved test numbers may be enabled",
+        "Choose a first live country before provider setup"
+      ]
+    }
+  ]
+}
