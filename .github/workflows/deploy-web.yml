@@ -46,7 +46,7 @@ jobs:
 
       - name: Build website
         env:
-          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || 'https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev' }}
         run: npm run build
 
       - name: Upload website files
