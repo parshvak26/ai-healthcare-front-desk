@@ -4,7 +4,7 @@
 
 - The public React website is hosted on GitHub Pages: `https://parshvak26.github.io/ai-healthcare-front-desk/`.
 - GitHub Actions builds the website from `main`. It uses the `VITE_API_BASE_URL` repository variable when set, with the demo Worker URL as a default.
-- A separate Cloudflare D1 database named `ai-healthcare-front-desk-demo` has been created for this project. Its schema is defined in `cloudflare/migrations/` and applied to the demo database.
+- Healthcare uses a separate restored Supabase free project, keeping its service key separate from HVAC. Worker source targets protected RPC functions; the schema migration and Cloudflare secret/deployment still need to be completed there. The old D1 migration is retained as history.
 - The Cloudflare Worker API is deployed at `https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev`. It uses synthetic data, simulates reminders, and accepts Retell events only from configured test numbers.
 - Cloudflare persisted observability logs and preview URLs are disabled in the Worker configuration to keep the demo small and avoid unnecessary public preview endpoints. Use `wrangler tail` for temporary diagnostics when needed.
 - Retell live calling is off. The signed-in workspace currently reports the service as deactivated, so calls cannot be tested until that account state changes.
@@ -16,13 +16,14 @@ The `Build and deploy demo website` workflow installs the locked dependencies, b
 
 ## Step 2 — Private API and database
 
-The demo database is separate from HVAC. The browser never connects to D1; only the Worker does. D1 is attached as the Worker's `DB` binding, so it needs no database URL or password secret.
+Use the separate Supabase project for healthcare; do not put the healthcare key in the HVAC Worker. The browser never connects to Supabase; only the Worker holds the server-side key. Access uses service-role-only RPC functions, so the private schema does not need to be exposed through the public API.
 
-1. For a fresh database, run `npm run migrate:db:remote` to create the demo tables from `cloudflare/migrations/`.
-2. Run `npm run deploy:api` to publish `ai-healthcare-front-desk-api` from `wrangler.toml`.
-3. Open the Worker URL plus `/api/health`. Confirm it reports `synthetic-demo`, the database is connected, and live calls and live SMS are disabled.
-4. The website workflow defaults to the Worker URL. Set the optional GitHub repository **variable** `VITE_API_BASE_URL` only if you change the API host, then rerun the Pages workflow.
-5. Reload the public site and confirm the header shows that the shared cloud demo is connected.
+1. Apply `supabase/migrations/20261003000100_healthcare_demo_backend.sql` in the healthcare Supabase project's SQL Editor. It creates only the private `healthcare` schema and its tables/functions.
+2. Store the Supabase server-side secret key in Cloudflare Worker secrets as `SUPABASE_SECRET_KEY`. Do not add it to GitHub or the website.
+3. Run `npm run deploy:api` to publish `ai-healthcare-front-desk-api` from `wrangler.toml`.
+4. Open the Worker URL plus `/api/health`. Confirm it reports `synthetic-demo`, the database is connected, and live calls and live SMS are disabled.
+5. The website workflow defaults to the Worker URL. Set the optional GitHub repository **variable** `VITE_API_BASE_URL` only if you change the API host, then rerun the Pages workflow.
+6. Reload the public site and confirm the header shows that the shared cloud demo is connected.
 
 Wrangler may request Cloudflare CLI sign-in the first time it is used. This is separate from browser sign-in. Do not enter or expose any API token in chat or source files. Retell secrets stay unset until the Retell account is active and a dedicated test number is chosen. Example local secret names are in `apps/worker/.dev.vars.example`.
 
@@ -46,8 +47,9 @@ Retell's own A2P SMS add-on for its Twilio numbers is limited to US numbers. Its
 
 ## Cost approach
 
-- Keep GitHub Pages, Cloudflare Worker, and the demo database on free tiers for synthetic data.
-- Current Cloudflare documentation lists 100,000 Worker requests/day and D1 quotas of 5 million rows read/day and 100,000 rows written/day on Free. [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)
+- Keep GitHub Pages, Cloudflare Worker, and the existing Supabase project on free tiers for synthetic data.
+- Reuse the current Supabase free project rather than create another one. Check its dashboard quotas before increasing usage.
+- Current Cloudflare documentation lists 100,000 Worker requests/day on the Free plan. [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)
 - Retell lists voice AI at $0.07–$0.31/minute. A call can cost money even when used for testing, so live calls stay disabled until the owner explicitly chooses a budget and test number. [Retell pricing](https://www.retellai.com/pricing)
 - If any dashboard prompts for a paid plan, extra phone number, credit purchase, or paid SMS sender, stop before accepting it.
 

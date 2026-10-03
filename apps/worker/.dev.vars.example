@@ -1,2 +1,4 @@
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_SECRET_KEY=
 RETELL_API_KEY=
 RETELL_TEST_NUMBERS=

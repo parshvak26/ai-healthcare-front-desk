@@ -251,7 +251,7 @@ Review this PRD and architecture, settle market/language/test-number choices, th
 Build the web console, fake clinic/scheduler, sample FAQs, synthetic appointments, document checklist, local message/call adapters, and complete admin workflows. No external account required.
 
 ### Phase 2 — cloud demo
-Create a separate Cloudflare Worker and D1 database; deploy the static UI through GitHub Actions; seed synthetic data; add a scheduled reminder job. Keep real provider modes off.
+Deploy the Cloudflare Worker and static UI through GitHub Actions; use a private `healthcare` schema in a separate free Supabase project; seed synthetic data; add a scheduled reminder job. Keep real provider modes off.
 
 ### Phase 3 — live voice pilot
 Configure a Retell inbound agent and one test number in one chosen market. Enable only approved test numbers, short calls, limited daily usage, and minimal call data retention.

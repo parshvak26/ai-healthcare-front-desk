@@ -408,7 +408,7 @@ function App() {
         <div className="sidebar-bottom">
           <div className="assistant-card">
             <div className="assistant-card-top"><span className="online-dot" />AI receptionist <span className="mock-tag">MOCK</span></div>
-            <p>Local demo mode. No calls or texts are sent.</p>
+            <p>{cloudStatus === "connected" || cloudStatus === "saving" ? "Shared cloud demo. No calls or texts are sent." : cloudStatus === "sync issue" ? "Cloud sync issue. No calls or texts are sent." : "Local demo mode. No calls or texts are sent."}</p>
             <button className="assistant-link" onClick={() => setShowCallDemo(true)}>Try a sample call <span>↗</span></button>
           </div>
           <div className="user-profile"><Avatar name="Owner" /><span><strong>Demo workspace</strong><small>Administrator</small></span><button className="more-button" aria-label="Profile options">···</button></div>

@@ -31,7 +31,7 @@ flowchart LR
   SVC --> SCH[Demo scheduler adapter]
   SVC --> FAQ[Approved FAQ service]
   SVC --> DOC[Sample document checklist]
-  SVC --> DB[(Cloudflare D1 demo database)]
+  SVC --> DB[(Supabase healthcare schema)]
   W --> MSG[Simulated message queue]
   STAFF[Front desk staff] --> UI
 ```
@@ -43,7 +43,8 @@ The Retell agent is a conversation channel. Its custom-function tools are implem
 - The React staff console works with fictional sample appointments, FAQs, document statuses, tasks, and messages.
 - If `VITE_API_BASE_URL` is empty, browser state stays in local storage. If set, the console loads and saves a shared synthetic demo snapshot through the Worker.
 - The Worker contains routes for state sync, FAQ search, appointment availability, and staff follow-up tasks, plus signed Retell custom-function and call-event endpoints.
-- The Worker uses a separate Cloudflare D1 database. The D1 schema is in `cloudflare/migrations/` and the database is attached only to the Worker.
+- The Worker uses a private `healthcare` schema in a separate free Supabase project. Its migration is in `supabase/migrations/`; only server-side RPC functions are exposed to the Worker, and the browser never connects to Supabase.
+- Healthcare has a different Supabase key from HVAC. The earlier D1 migration is retained as deployment history. The application no longer reads or writes the D1 database.
 - The Worker cron task marks due simulated messages as `Delivered (demo)`; it never sends a text.
 - Referral/document handling is a sample checklist and status change. No file upload, private file bucket, OCR, or real record is stored.
 - Live Retell service is currently deactivated in the signed-in workspace. Voice calls and SMS remain off.
@@ -55,11 +56,11 @@ The Retell agent is a conversation channel. Its custom-function tools are implem
 | Public web UI | React, Vite, TypeScript; GitHub Pages | Matches HVAC, static build, low hosting cost. Public source/site is intended for a portfolio demo with synthetic data. |
 | CI and web deploy | GitHub Actions workflow on main and manual dispatch | Runs project checks, builds the UI, then deploys the static artifact, like HVAC. |
 | Private API | Cloudflare Worker with TypeScript and Wrangler | Matches HVAC; holds API secrets, receives provider webhooks, and runs scheduled reminder checks. |
-| Demo database | Cloudflare D1 | Separate synthetic demo database with no database password to manage. |
+| Demo database | Dedicated Supabase free project with private `healthcare` schema | Keeps the healthcare tables and service key separate from HVAC. |
 | Demo file storage | Not connected | The current public demo stores sample document status only; it does not upload files. |
 | Voice | Retell inbound phone agent | Uses the existing voice-agent provider and webhook pattern. |
 | SMS | SmsProvider interface, provider selected after first pilot country is chosen | Avoids assuming one phone/SMS provider works in all named markets or has the lowest cost. Live sends are restricted to approved tester numbers. |
-| Local development | Mock scheduler, mock Retell, mock SMS, Wrangler's local D1 database | No external account or call/text charge needed while building. |
+| Local development | Mock scheduler, mock Retell, mock SMS, browser local storage | No external account or call/text charge needed while building. |
 
 ### Important hosting boundary
 
@@ -80,7 +81,8 @@ Suggested packages and folders:
 apps/web/              React and Vite UI
 apps/worker/           Cloudflare Worker, HTTP routes, webhooks, scheduled job
 packages/shared/       Shared request/response schemas and public types
-  cloudflare/migrations/ Versioned D1 schema migrations
+  supabase/migrations/   Versioned healthcare database migrations
+  cloudflare/migrations/ Retained D1 migration history from initial deployment
   packages/shared/       Shared API and state types
 retell/                Voice-agent prompt, tools, and setup notes
 docs/                  PRD, architecture, local setup, deployment, safety, FAQ
@@ -199,7 +201,7 @@ Every row is scoped to a clinic. A tenant_id field prepares the model for more t
 - Do not store full payment card data, government identity numbers, insurance member numbers, diagnoses, or clinical notes.
 - Never store audio by default. Keep call summary fields short, factual, and administrative.
 - Use a private storage bucket, short-lived upload tokens, strict size/type limits, and scheduled deletion.
-- D1 has no public browser credential. The Worker is the only application client, and the D1 binding is private to that Worker.
+- The Supabase secret stays in the Worker secret store. Private tables have no client-role grants; the Worker uses narrowly scoped service-role RPC functions.
 - Public API responses use opaque IDs and omit private contact, storage, and provider identifiers.
 - Local development uses non-production credentials and fake providers.
 
@@ -297,7 +299,7 @@ Deployment follows HVAC:
 Current public pricing pages list:
 
 - GitHub Pages availability for public repositories on GitHub Free. Pages has a documented usage boundary and is not intended for commercial SaaS. See https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits
-- Cloudflare Workers Free includes 100,000 requests per day; D1 Free includes 5 million rows read/day, 100,000 rows written/day, and 5 GB total storage. See [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
+- Cloudflare Workers Free includes 100,000 requests per day. Supabase quotas vary by plan and can change, so check the existing project's dashboard before expanding usage. See [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
 - Retell currently lists voice AI at $0.07–$0.31/minute; phone-number and SMS costs depend on the telephony setup. See [Retell pricing](https://www.retellai.com/pricing).
 
 Cost controls:
@@ -314,7 +316,7 @@ Cost controls:
 ### Proposed decisions
 - Separate repo and separate cloud resources from HVAC.
 - Public code and static demo site, synthetic seed data.
-- React/Vite/TypeScript + Cloudflare Worker + D1 + Retell, following the HVAC hosting pattern.
+- React/Vite/TypeScript + Cloudflare Worker + Supabase + Retell, following the HVAC hosting pattern.
 - Demo scheduler as first backend, no EHR.
 - Mock external services as the local default.
 - Appointment confirmation, 24-hour reminder, and missing-document follow-up at 48 hours.
@@ -323,7 +325,7 @@ Cost controls:
 - Clinic scheduling timezone and viewer display timezone are separate controls.
 - Any live calls or texts must be restricted to the owner's approved test numbers.
 - Booking confirmation, 24-hour appointment reminder, and a missing-document follow-up 48 hours after booking.
-- The public UI uses demo data. The D1 database exists and the Worker migration/deployment remain to be applied; live voice and SMS are not enabled.
+- The public UI uses demo data. The Supabase healthcare migration and Worker connection remain to be applied; live voice and SMS are not enabled.
 
 ### Open for the later live phase
 - Which countries belong under the Europe market option.

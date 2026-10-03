@@ -2,27 +2,13 @@ import { createSeedState, faqEntries, allowedDemoPatients } from "../../web/src/
 import type { Appointment, DemoState, FollowUpTask } from "../../../packages/shared/src/types.ts";
 
 interface Env {
-  DB?: D1Database;
+  SUPABASE_URL?: string;
+  SUPABASE_SECRET_KEY?: string;
   CLINIC_ID?: string;
   PUBLIC_ORIGINS?: string;
   RETELL_API_KEY?: string;
   RETELL_TEST_NUMBERS?: string;
   SMS_MODE?: string;
-}
-
-interface D1Result {
-  success: boolean;
-  meta: { changes: number };
-}
-
-interface D1PreparedStatement {
-  bind(...values: unknown[]): D1PreparedStatement;
-  first<T = Record<string, unknown>>(): Promise<T | null>;
-  run(): Promise<D1Result>;
-}
-
-interface D1Database {
-  prepare(query: string): D1PreparedStatement;
 }
 
 interface StateSnapshot {
@@ -123,12 +109,28 @@ function problem(code: string, message: string) {
   return { error: { code, message } };
 }
 
-function configured(env: Env): env is Env & { DB: D1Database } {
-  return Boolean(env.DB);
+function configured(env: Env): env is Env & { SUPABASE_URL: string; SUPABASE_SECRET_KEY: string } {
+  return Boolean(env.SUPABASE_URL && env.SUPABASE_SECRET_KEY);
 }
 
 class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message); }
+}
+
+async function supabaseRequest(env: Env, endpoint: string, init: RequestInit = {}) {
+  if (!configured(env)) throw new ApiError(503, "backend_not_configured", "The cloud demo has not been connected yet.");
+  const url = new URL(`/rest/v1/${endpoint}`, env.SUPABASE_URL);
+  const headers = new Headers(init.headers);
+  headers.set("apikey", env.SUPABASE_SECRET_KEY);
+  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  // Legacy JWT service-role keys need Authorization; new sb_secret keys must only use apikey.
+  if (env.SUPABASE_SECRET_KEY.split(".").length === 3) headers.set("Authorization", `Bearer ${env.SUPABASE_SECRET_KEY}`);
+  const response = await fetch(url, { ...init, headers });
+  if (!response.ok) {
+    console.error(JSON.stringify({ event: "database_request_failed", endpoint: endpoint.split("?")[0], status: response.status }));
+    throw new ApiError(502, "database_error", "The demo database could not complete that request.");
+  }
+  return response;
 }
 
 async function consumeLimit(request: Request, env: Env, kind: "read" | "write") {
@@ -137,32 +139,39 @@ async function consumeLimit(request: Request, env: Env, kind: "read" | "write") 
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(ip));
   const key = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
   const windowSeconds = 60;
-  const result = await env.DB.prepare(`
-    INSERT INTO demo_rate_limits (client_hash, window_started_at, request_count, updated_at)
-    VALUES (?, unixepoch(), 1, unixepoch())
-    ON CONFLICT(client_hash) DO UPDATE SET
-      window_started_at = CASE WHEN demo_rate_limits.window_started_at + ? <= unixepoch() THEN unixepoch() ELSE demo_rate_limits.window_started_at END,
-      request_count = CASE WHEN demo_rate_limits.window_started_at + ? <= unixepoch() THEN 1 ELSE demo_rate_limits.request_count + 1 END,
-      updated_at = unixepoch()
-    RETURNING request_count
-  `).bind(key, windowSeconds, windowSeconds).first<{ request_count: number }>();
+  const response = await supabaseRequest(env, "rpc/healthcare_consume_demo_rate_limit", {
+    method: "POST",
+    body: JSON.stringify({ p_client_hash: key, p_window_seconds: windowSeconds }),
+  });
+  const result: unknown = await response.json();
+  const requestCount = typeof result === "number" ? result : NaN;
   const limit = kind === "read" ? 120 : 30;
-  if (!result || result.request_count > limit) throw new ApiError(429, "rate_limited", "Please wait a minute before trying again.");
+  if (!Number.isInteger(requestCount)) throw new ApiError(502, "database_error", "The demo database could not complete that request.");
+  if (requestCount > limit) throw new ApiError(429, "rate_limited", "Please wait a minute before trying again.");
 }
 
 async function loadSnapshot(env: Env): Promise<StateSnapshot> {
   if (!configured(env)) throw new ApiError(503, "backend_not_configured", "The cloud demo has not been connected yet.");
   const id = clinicId(env);
-  const read = () => env.DB.prepare("SELECT state, revision FROM demo_state_snapshots WHERE clinic_id = ? LIMIT 1").bind(id).first<{ state: string; revision: number }>();
-  let row = await read();
-  if (!row) {
-    await env.DB.prepare("INSERT INTO demo_state_snapshots (clinic_id, state, revision) VALUES (?, ?, 1) ON CONFLICT(clinic_id) DO NOTHING")
-      .bind(id, JSON.stringify(createSeedState())).run();
-    row = await read();
+  const read = async () => {
+    const response = await supabaseRequest(env, "rpc/healthcare_read_demo_state", {
+      method: "POST",
+      body: JSON.stringify({ p_clinic_id: id }),
+    });
+    return await response.json() as Array<{ state: DemoState; revision: number }>;
+  };
+  let rows = await read();
+  if (!rows.length) {
+    await supabaseRequest(env, "rpc/healthcare_initialize_demo_state", {
+      method: "POST",
+      body: JSON.stringify({ p_clinic_id: id, p_state: createSeedState() }),
+    });
+    rows = await read();
   }
+  const row = rows[0];
   if (!row?.state) throw new ApiError(502, "demo_seed_failed", "The sample schedule could not be loaded.");
-  try { return { state: JSON.parse(row.state) as DemoState, revision: Number(row.revision) }; }
-  catch { throw new ApiError(502, "demo_seed_failed", "The sample schedule could not be loaded."); }
+  if (!Number.isInteger(Number(row.revision)) || Number(row.revision) < 1) throw new ApiError(502, "demo_seed_failed", "The sample schedule could not be loaded.");
+  return { state: row.state, revision: Number(row.revision) };
 }
 
 function validateDemoState(value: unknown): value is DemoState {
@@ -224,13 +233,15 @@ function isTimezone(value: unknown): value is string {
 async function saveSnapshot(env: Env, snapshot: StateSnapshot, state: DemoState) {
   if (!configured(env)) throw new ApiError(503, "backend_not_configured", "The cloud demo has not been connected yet.");
   if (!validateDemoState(state)) throw new ApiError(422, "demo_data_only", "Use the built-in fictional sample data only.");
-  const result = await env.DB.prepare(`
-    UPDATE demo_state_snapshots SET state = ?, revision = revision + 1, updated_at = unixepoch()
-    WHERE clinic_id = ? AND revision = ?
-  `).bind(JSON.stringify(state), clinicId(env), snapshot.revision).run();
-  if (!result.success) throw new ApiError(502, "database_error", "The demo database could not complete that request.");
-  if (result.meta.changes !== 1) throw new ApiError(409, "demo_state_conflict", "Another demo session saved first. Reload the sample schedule and try again.");
-  return { state, revision: snapshot.revision + 1 };
+  const response = await supabaseRequest(env, "rpc/healthcare_save_demo_state", {
+    method: "POST",
+    body: JSON.stringify({ p_clinic_id: clinicId(env), p_expected_revision: snapshot.revision, p_state: state }),
+  });
+  const result: unknown = await response.json();
+  const row = Array.isArray(result) ? result[0] as { saved?: boolean; revision?: number } | undefined : undefined;
+  if (!row?.saved) throw new ApiError(409, "demo_state_conflict", "Another demo session saved first. Reload the sample schedule and try again.");
+  if (!Number.isInteger(Number(row.revision)) || Number(row.revision) !== snapshot.revision + 1) throw new ApiError(502, "database_error", "The demo database could not complete that request.");
+  return { state, revision: Number(row.revision) };
 }
 
 async function mutateSnapshot(env: Env, change: (state: DemoState) => DemoState | Promise<DemoState>) {
@@ -545,8 +556,10 @@ async function handleRetellEvent(request: Request, env: Env) {
   const event = stringField(body.event, "event type", 50);
   // Store no phone number, transcript, audio, summary, or caller-provided text.
   if (!configured(env)) throw new ApiError(503, "backend_not_configured", "The cloud demo has not been connected yet.");
-  await env.DB.prepare("INSERT INTO retell_call_events (call_id, event, received_at) VALUES (?, ?, unixepoch()) ON CONFLICT(call_id, event) DO NOTHING")
-    .bind(callId, event).run();
+  await supabaseRequest(env, "rpc/healthcare_record_retell_call_event", {
+    method: "POST",
+    body: JSON.stringify({ p_call_id: callId, p_event: event }),
+  });
   return { accepted: true };
 }
 
@@ -574,7 +587,10 @@ async function fetchHandler(request: Request, env: Env): Promise<Response> {
       let databaseConnected = false;
       if (configured(env)) {
         try {
-          await env.DB.prepare("SELECT clinic_id FROM demo_state_snapshots LIMIT 1").first();
+          await supabaseRequest(env, "rpc/healthcare_read_demo_state", {
+            method: "POST",
+            body: JSON.stringify({ p_clinic_id: clinicId(env) }),
+          });
           databaseConnected = true;
         } catch { /* Health output stays generic and never exposes provider details. */ }
       }

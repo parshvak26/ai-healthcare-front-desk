@@ -135,8 +135,8 @@
     {
       "id": "database",
       "type": "database",
-      "label": "Cloudflare D1",
-      "sublabel": "Synthetic demo state",
+      "label": "Supabase",
+      "sublabel": "Private healthcare schema",
       "pos": [
         1080,
         330

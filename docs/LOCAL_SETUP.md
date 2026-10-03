@@ -21,9 +21,9 @@ The website works locally with fictional sample data and does not need provider 
 
 ## Optional local API
 
-The Worker and demo database use Cloudflare D1. Wrangler creates a local copy on your computer; it does not connect to the cloud database while running locally.
+The website works on its own with browser local storage. Connecting the local Worker to the shared API needs the Supabase server-side credentials and should use fictional data only.
 
-1. In a second terminal, run `npm run migrate:db:local` once to create the local demo tables.
+1. Add `SUPABASE_URL` and `SUPABASE_SECRET_KEY` to the ignored `apps/worker/.dev.vars` file using the example template.
 2. Run `npm run dev:api` to start the Worker at `http://localhost:8787`.
 3. Copy `apps/web/.env.example` to `apps/web/.env.local` and set `VITE_API_BASE_URL=http://localhost:8787`.
 4. Restart `npm run dev` so the website connects to the local Worker.
