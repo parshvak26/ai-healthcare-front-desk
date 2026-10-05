@@ -260,7 +260,7 @@ Configure a Retell inbound agent and one test number in one chosen market. Enabl
 Connect the selected country-capable SMS provider, verify opt-in/opt-out, templates, quiet hours, delivery status, and deduplication using test numbers only.
 
 ### Phase 5 — broaden the demo
-Enable additional markets, timezones, and reviewed languages; add waitlist, callback, records/refill/billing intake, analytics, and more FAQ content.
+Enable additional markets, timezones, and reviewed languages; extend analytics and FAQ content. The current demo already includes a synthetic waitlist, callback queue, records/refill/billing intake, and document-status workflows.
 
 ### Phase 6 — real clinic readiness (separate scope)
 Choose EHR/scheduler, phone/SMS vendors, data-region requirements, access model, retention, legal/contract controls, and security review. The demo must not be used as a real clinic service before this work is complete.

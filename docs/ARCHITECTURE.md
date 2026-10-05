@@ -325,7 +325,7 @@ Cost controls:
 - Clinic scheduling timezone and viewer display timezone are separate controls.
 - Any live calls or texts must be restricted to the owner's approved test numbers.
 - Booking confirmation, 24-hour appointment reminder, and a missing-document follow-up 48 hours after booking.
-- The public UI uses demo data. The Supabase healthcare migration and Worker connection remain to be applied; live voice and SMS are not enabled.
+- The public UI uses demo data. The healthcare Supabase migration is applied and the Cloudflare Worker is connected and deployed; the Retell account is active, but the Healthcare agent is a draft without a phone number. Live voice actions and SMS remain disabled.
 
 ### Open for the later live phase
 - Which countries belong under the Europe market option.
