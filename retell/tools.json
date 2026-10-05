@@ -15,6 +15,20 @@
       }
     },
     {
+      "name": "join_waitlist",
+      "description": "Add a fictional patient to the demo waitlist when no suitable time is available. Confirm the preferred date and sample name first. This creates a staff follow-up only; it does not book an appointment or send a text.",
+      "parameters": {
+        "type": "object",
+        "required": ["patient_name", "appointment_type", "preferred_date", "timezone"],
+        "properties": {
+          "patient_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] },
+          "appointment_type": { "type": "string", "enum": ["New patient visit", "Follow-up visit", "Consultation", "Administrative call"] },
+          "preferred_date": { "type": "string", "description": "Preferred local clinic date in YYYY-MM-DD format." },
+          "timezone": { "type": "string", "description": "IANA clinic timezone, for example America/Chicago or Asia/Kolkata." }
+        }
+      }
+    },
+    {
       "name": "create_appointment",
       "description": "Book a fictional appointment only after the caller confirms one returned open slot. Use one of the sample names only.",
       "parameters": {

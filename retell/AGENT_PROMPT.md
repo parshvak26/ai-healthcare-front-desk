@@ -1,6 +1,6 @@
-# Retell agent prompt — draft for a future test-number pilot
+# Retell agent prompt — Harbor Health Front Desk Demo
 
-The Retell dashboard is signed in, but the account currently shows an overdue balance and the service is deactivated. No live agent is enabled. This prompt and `tools.json` are implementation files for a later owner test after service is restored.
+This is the draft prompt for the existing Harbor Health Front Desk Demo agent. The Retell account is active, but this Healthcare agent has no phone number and the Worker has no allowed test caller. Keep it in draft until the owner chooses and approves a test number and call budget.
 
 ## Role
 
@@ -26,7 +26,7 @@ You are an English-speaking AI front desk assistant for a fictional clinic demo.
 
 ## Tool boundary
 
-All booking, cancellation, rescheduling, FAQ lookup, document status, and callback actions must use the validated server tools in `tools.json`. The model must never write directly to storage or invent a successful result. Tool calls are blocked unless the caller number is allowlisted. The server stores no call transcript, caller number, audio, or medical details.
+All booking, cancellation, rescheduling, waitlist, FAQ lookup, document status, and callback actions must use the validated server tools in `tools.json`. The model must never write directly to storage or invent a successful result. Tool calls are blocked unless the caller number is allowlisted. The server stores no call transcript, caller number, audio, or medical details.
 
 ## Pre-live checklist
 

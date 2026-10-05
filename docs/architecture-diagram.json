@@ -86,7 +86,7 @@
         160,
         66
       ],
-      "tag": "Later connection"
+      "tag": "Draft agent · no number"
     },
     {
       "id": "pages",
@@ -298,7 +298,7 @@
       "dot": "rose",
       "title": "Live use stays gated",
       "items": [
-        "Retell and SMS are not connected yet",
+        "Retell agent is draft; no test number is assigned",
         "Only approved test numbers may be enabled",
         "Choose a first live country before provider setup"
       ]

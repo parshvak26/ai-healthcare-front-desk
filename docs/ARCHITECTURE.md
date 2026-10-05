@@ -36,18 +36,18 @@ flowchart LR
   STAFF[Front desk staff] --> UI
 ```
 
-The Retell agent is a conversation channel. Its custom-function tools are implemented in the Worker, but live Retell calls are not active. Texts and reminders are simulated; no SMS provider is connected. The Worker validates demo records and never provides clinical decisions.
+The Retell account is active and has a Healthcare draft agent without a phone number. Its signed custom-function routes are implemented in the Worker, but no caller is allowlisted, so tool actions are rejected. Texts and reminders are simulated; no SMS provider is connected. The Worker validates demo records and never provides clinical decisions.
 
 ### Current implementation
 
-- The React staff console works with fictional sample appointments, FAQs, document statuses, tasks, and messages.
+- The React staff console works with fictional sample appointments, waitlist requests, FAQs, document statuses, tasks, and messages.
 - If `VITE_API_BASE_URL` is empty, browser state stays in local storage. If set, the console loads and saves a shared synthetic demo snapshot through the Worker.
 - The Worker contains routes for state sync, FAQ search, appointment availability, and staff follow-up tasks, plus signed Retell custom-function and call-event endpoints.
 - The Worker uses a private `healthcare` schema in a separate free Supabase project. Its migration is in `supabase/migrations/`; only server-side RPC functions are exposed to the Worker, and the browser never connects to Supabase.
 - Healthcare has a different Supabase key from HVAC. The earlier D1 migration is retained as deployment history. The application no longer reads or writes the D1 database.
 - The Worker cron task marks due simulated messages as `Delivered (demo)`; it never sends a text.
 - Referral/document handling is a sample checklist and status change. No file upload, private file bucket, OCR, or real record is stored.
-- Live Retell service is currently deactivated in the signed-in workspace. Voice calls and SMS remain off.
+- The Healthcare Retell agent is a draft with no phone number. Voice actions are blocked by an empty caller allowlist, and SMS remains simulation-only.
 
 ## 3. Hosting and initial stack
 
@@ -238,7 +238,7 @@ Implemented routes in the current Worker:
 - POST /webhooks/retell/custom-function
 - POST /webhooks/retell/events
 
-Waitlists, file upload, SMS-provider webhooks, user authentication, and real clinic administration are not implemented.
+File upload, SMS-provider webhooks, user authentication, and real clinic administration are not implemented. The demo waitlist is synthetic and only creates a staff follow-up when a matching appointment is cancelled.
 
 Voice tool requests use shared typed schemas, strict allowlists, size limits, and request IDs. Webhooks verify provider signatures against the raw request body, reject replays, and acknowledge promptly. Inbound message routes must first apply STOP/opt-out handling before ordinary intent processing.
 
@@ -291,7 +291,7 @@ Deployment follows HVAC:
 
 1. GitHub Actions installs locked dependencies and deploys only the website to GitHub Pages.
 2. The Worker and database migration are included in this repository but are deployed separately.
-3. Retell credentials and the test-number allowlist remain unset until its account is active and the selected market is confirmed.
+3. The Retell webhook secret is in Cloudflare. The Healthcare agent is a draft; the test-number allowlist stays empty until the owner selects and approves a pilot number.
 4. SMS has no provider; local and cloud reminder flows are simulations.
 
 ## 12. Cost plan

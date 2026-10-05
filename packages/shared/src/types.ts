@@ -47,9 +47,20 @@ export interface MessageItem {
   status: "Delivered (demo)" | "Queued (demo)" | "Scheduled (demo)" | "Cancelled (demo)" | "Opt-out";
 }
 
+export interface WaitlistItem {
+  id: string;
+  patient: string;
+  appointmentType: string;
+  preferredDate: string;
+  timezone: string;
+  createdAt: string;
+  status: "Waiting" | "Opening found" | "Contacted" | "Booked" | "Cancelled";
+}
+
 export interface DemoState {
   appointments: Appointment[];
   tasks: FollowUpTask[];
   referrals: ReferralItem[];
   messages: MessageItem[];
+  waitlist: WaitlistItem[];
 }

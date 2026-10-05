@@ -7,7 +7,7 @@
 - Healthcare uses a separate Supabase project, keeping its service key separate from HVAC. The private schema migration is applied and verified. The Cloudflare Worker now targets the protected Supabase RPC functions; its encrypted Production secret is set, and `/api/health` confirms the database connection. The old D1 migration is retained as history.
 - The Cloudflare Worker API is deployed at `https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev`. It uses synthetic data, simulates reminders, and accepts Retell events only from configured test numbers.
 - Cloudflare persisted observability logs and preview URLs are disabled in the Worker configuration to keep the demo small and avoid unnecessary public preview endpoints. Use `wrangler tail` for temporary diagnostics when needed.
-- Retell live calling is off. The signed-in workspace currently reports the service as deactivated, so calls cannot be tested until that account state changes.
+- Retell is active. The Healthcare agent is still a draft and has no phone number; the Worker's caller allowlist is empty, so tool actions are rejected until a test caller is explicitly configured.
 - SMS is mock-only. The Worker does not call an SMS provider, and the reminder job only updates fictional message records.
 
 ## Step 1 — Website
@@ -27,9 +27,9 @@ Use the separate Supabase project for healthcare; do not put the healthcare key 
 
 The Supabase secret is already stored in Cloudflare Production; never put it in GitHub or the website. The Retell webhook-signing key is also stored as an encrypted Cloudflare Production secret. Do not expose either key in chat or source files. The worker's test-number allowlist is still empty, so Retell calls cannot run its tools. Example local secret names are in `apps/worker/.dev.vars.example`.
 
-## Step 3 — Voice setup (later)
+## Step 3 — Retell voice setup
 
-Only after Retell service is active and the owner selects the market/test number:
+The active Retell workspace contains a Healthcare draft agent, and the signed webhook key is already stored as an encrypted Cloudflare Production secret. Its Healthcare agent has no phone number, and no caller is allowlisted. Keep the agent unpublished and the allowlist empty until a test number and a call budget are chosen.
 
 1. Create a separate demo agent; do not change the HVAC agent.
 2. Use `retell/AGENT_PROMPT.md` and configure the functions in `retell/tools.json` to call `/webhooks/retell/custom-function`.
@@ -37,7 +37,7 @@ Only after Retell service is active and the owner selects the market/test number
 4. Add only the owner's test numbers to the Worker's allowlist. Set short call-duration and daily limits in Retell.
 5. Do not enable call recording, transcripts, or public inbound access for the sample demo.
 
-The Retell workspace currently shows an overdue balance and service deactivation. The account owner must restore the service and choose one pilot country/number before live calls can be configured. This repository does not pay a balance, buy a number, or enable billing. Until then, calls remain off and the test-number allowlist stays empty.
+Retell calls, including dashboard testing, may use account credit. This setup does not buy a number or run a live test call. Choose one pilot country and test number before allowing callers or publishing the agent. Keep the allowlist empty until then.
 
 ## Step 4 — Text reminders (later)
 

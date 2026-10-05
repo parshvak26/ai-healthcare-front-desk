@@ -221,6 +221,12 @@ h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; 
 .storage-note { display: flex; align-items: flex-start; gap: 8px; margin: 12px 18px 16px; padding: 10px; border-radius: 7px; background: #f8fafb; color: #8795a1; }
 .storage-note span { width: 14px; height: 14px; display: grid; flex: 0 0 auto; place-items: center; border: 1px solid #c4d4da; border-radius: 50%; color: #7e9aa5; font-size: 8px; }
 .storage-note p { margin: 0; font-size: 8px; line-height: 1.45; }
+.waitlist-list { padding: 0 18px; }
+.waitlist-entry { min-height: 68px; display: grid; grid-template-columns: 28px minmax(120px, 1fr) minmax(120px, .8fr) auto auto; align-items: center; gap: 12px; border-top: 1px solid #eff1f4; }
+.waitlist-person, .waitlist-date { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.waitlist-person strong, .waitlist-date strong { color: #455668; font-size: 9px; }
+.waitlist-person span, .waitlist-date span, .waitlist-date small { color: #94a0ac; font-size: 8px; }
+.waitlist-entry .row-text-action { justify-self: end; }
 .followup-banner-card { display: flex; align-items: center; gap: 12px; padding: 14px 17px; }
 .calendar-illustration { width: 33px; height: 33px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 9px; background: #eff4fa; color: #6687a6; font-size: 16px; }
 .followup-banner-card > div:nth-child(2) { flex: 1; }
@@ -391,6 +397,12 @@ h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; 
   .document-date { min-width: 0; flex: 1; padding-left: 39px; }
   .document-row .row-text-action { margin-left: auto; }
   .document-list, .task-list, .message-list { padding-right: 12px; padding-left: 12px; }
+  .waitlist-list { padding-right: 12px; padding-left: 12px; }
+  .waitlist-entry { grid-template-columns: 27px 1fr auto; gap: 8px; padding: 12px 0; }
+  .waitlist-person { grid-column: 2; }
+  .waitlist-date { grid-column: 2; }
+  .waitlist-entry > .pill { grid-column: 3; grid-row: 1; }
+  .waitlist-entry .row-text-action, .waitlist-entry > .waitlist-date:last-child { grid-column: 3; grid-row: 2; }
   .task-row { flex-wrap: wrap; gap: 8px; padding: 12px 0; }
   .task-body { flex-basis: calc(100% - 40px); }
   .task-due { margin-left: 34px; }

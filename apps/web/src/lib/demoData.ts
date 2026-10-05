@@ -146,6 +146,26 @@ export function createSeedState(): DemoState {
         status: "Opt-out",
       },
     ],
+    waitlist: [
+      {
+        id: "wait-1",
+        patient: "Taylor Reed",
+        appointmentType: "Consultation",
+        preferredDate: new Date(Date.now() + 96 * 60 * 60 * 1000).toISOString().slice(0, 10),
+        timezone: "America/Chicago",
+        createdAt: atHour(-4),
+        status: "Waiting",
+      },
+      {
+        id: "wait-2",
+        patient: "Maya Patel",
+        appointmentType: "Follow-up visit",
+        preferredDate: new Date(Date.now() + 120 * 60 * 60 * 1000).toISOString().slice(0, 10),
+        timezone: "America/Chicago",
+        createdAt: atHour(-1),
+        status: "Waiting",
+      },
+    ],
   };
 }
 

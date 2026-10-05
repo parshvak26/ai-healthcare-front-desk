@@ -1,5 +1,5 @@
 import { createSeedState, faqEntries, allowedDemoPatients } from "../../web/src/lib/demoData.ts";
-import type { Appointment, DemoState, FollowUpTask } from "../../../packages/shared/src/types.ts";
+import type { Appointment, DemoState, FollowUpTask, WaitlistItem } from "../../../packages/shared/src/types.ts";
 
 interface Env {
   SUPABASE_URL?: string;
@@ -53,10 +53,12 @@ const safeTaskDetails = new Set([
   "An unlisted FAQ needs staff review. The question text is not stored.",
   "A published demo FAQ was flagged for staff review. No caller text was stored.",
   "Check whether the sample referral has arrived; the 48-hour text remains simulated.",
+  "A sample opening is available; confirm the waitlist request with the sample patient.",
 ]);
 const safeTaskTitles = new Set([
   "Call back requested", "Referral document missing", "Billing question", "Records request",
   "Medical records request", "FAQ question", "FAQ needs review", "Prescription request", "Referral document follow-up",
+  "Waitlist follow-up",
 ]);
 
 function hasOnlyKeys(value: unknown, allowed: readonly string[]) {
@@ -66,6 +68,13 @@ function hasOnlyKeys(value: unknown, allowed: readonly string[]) {
 
 function validTimestamp(value: unknown) {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) && Number.isFinite(Date.parse(value));
+}
+
+function validDate(value: unknown) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
 function validDemoId(value: unknown) {
@@ -171,14 +180,24 @@ async function loadSnapshot(env: Env): Promise<StateSnapshot> {
   const row = rows[0];
   if (!row?.state) throw new ApiError(502, "demo_seed_failed", "The sample schedule could not be loaded.");
   if (!Number.isInteger(Number(row.revision)) || Number(row.revision) < 1) throw new ApiError(502, "demo_seed_failed", "The sample schedule could not be loaded.");
-  return { state: row.state, revision: Number(row.revision) };
+  const storedState = row.state as Partial<DemoState>;
+  const hasStoredWaitlist = Object.hasOwn(storedState, "waitlist");
+  if (hasStoredWaitlist && !Array.isArray(storedState.waitlist)) throw new ApiError(502, "demo_seed_failed", "The sample schedule could not be loaded.");
+  const state = {
+    ...storedState,
+    waitlist: Array.isArray(storedState.waitlist) ? storedState.waitlist : createSeedState().waitlist,
+  } as DemoState;
+  if (!validateDemoState(state)) throw new ApiError(502, "demo_seed_failed", "The sample schedule could not be loaded.");
+  const snapshot = { state, revision: Number(row.revision) };
+  if (!hasStoredWaitlist) return saveSnapshot(env, snapshot, state);
+  return snapshot;
 }
 
 function validateDemoState(value: unknown): value is DemoState {
-  if (!hasOnlyKeys(value, ["appointments", "tasks", "referrals", "messages"])) return false;
+  if (!hasOnlyKeys(value, ["appointments", "tasks", "referrals", "messages", "waitlist"])) return false;
   const state = value as Partial<DemoState>;
-  if (!Array.isArray(state.appointments) || !Array.isArray(state.tasks) || !Array.isArray(state.referrals) || !Array.isArray(state.messages)) return false;
-  if (state.appointments.length > 100 || state.tasks.length > 100 || state.referrals.length > 100 || state.messages.length > 200) return false;
+  if (!Array.isArray(state.appointments) || !Array.isArray(state.tasks) || !Array.isArray(state.referrals) || !Array.isArray(state.messages) || !Array.isArray(state.waitlist)) return false;
+  if (state.appointments.length > 100 || state.tasks.length > 100 || state.referrals.length > 100 || state.messages.length > 200 || state.waitlist.length > 100) return false;
   for (const item of state.appointments) {
     if (!hasOnlyKeys(item, ["id", "patient", "reference", "type", "provider", "location", "startAt", "timezone", "status", "documents"])) return false;
     if (!validDemoId(item.id) || !allowedNames.has(item.patient) || !/^DEMO-\d{4}$/.test(item.reference) || !Object.hasOwn(serviceDurations, item.type)) return false;
@@ -220,6 +239,12 @@ function validateDemoState(value: unknown): value is DemoState {
     if (item.appointmentReference !== undefined && !/^DEMO-\d{4}$/.test(item.appointmentReference)) return false;
     if (!["Booking confirmation", "Document reminder", "24-hour appointment reminder", "48-hour missing-document follow-up", "Reschedule confirmation", "Cancellation confirmation", "Opt-out"].includes(item.purpose)) return false;
     if (!["Delivered (demo)", "Queued (demo)", "Scheduled (demo)", "Cancelled (demo)", "Opt-out"].includes(item.status)) return false;
+  }
+  for (const item of state.waitlist) {
+    if (!hasOnlyKeys(item, ["id", "patient", "appointmentType", "preferredDate", "timezone", "createdAt", "status"])) return false;
+    if (!validDemoId(item.id) || !allowedNames.has(item.patient) || !Object.hasOwn(serviceDurations, item.appointmentType)) return false;
+    if (!validDate(item.preferredDate) || !isTimezone(item.timezone) || !validTimestamp(item.createdAt)) return false;
+    if (!["Waiting", "Opening found", "Contacted", "Booked", "Cancelled"].includes(item.status)) return false;
   }
   return true;
 }
@@ -359,6 +384,23 @@ function scheduleFor(state: DemoState, patient: string, reference: string, start
   };
 }
 
+function releaseOpeningToWaitlist(state: DemoState, appointment: Appointment): DemoState {
+  const opening = state.waitlist.find((item) => item.status === "Waiting"
+    && item.appointmentType === appointment.type
+    && item.preferredDate === localDate(new Date(appointment.startAt), item.timezone));
+  if (!opening) return state;
+  const task: FollowUpTask = {
+    id: demoId("task"), title: "Waitlist follow-up", patient: opening.patient,
+    detail: "A sample opening is available; confirm the waitlist request with the sample patient.",
+    dueAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), priority: "Today", status: "Open",
+  };
+  return {
+    ...state,
+    waitlist: state.waitlist.map((item) => item.id === opening.id ? { ...item, status: "Opening found" as const } : item),
+    tasks: [task, ...state.tasks].slice(0, 100),
+  };
+}
+
 function freshReference(state: DemoState) {
   let reference = "";
   do { reference = `DEMO-${Math.floor(1000 + Math.random() * 9000)}`; }
@@ -418,7 +460,7 @@ async function retellTool(name: string, args: JsonRecord, call: ToolCall, env: E
   }
   if (name === "get_availability") {
     const date = stringField(args.date, "date", 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new ApiError(400, "invalid_date", "Use a date like 2026-10-15.");
+    if (!validDate(date)) throw new ApiError(400, "invalid_date", "Use a valid date like 2026-10-15.");
     const type = stringField(args.appointment_type, "appointment type", 60);
     const timezone = validateTimezone(args.timezone);
     const snapshot = await loadSnapshot(env);
@@ -491,13 +533,14 @@ async function retellTool(name: string, args: JsonRecord, call: ToolCall, env: E
         body: "Your sample appointment has been cancelled. This is a demo message; nothing was sent.",
         sentAt: new Date().toISOString(), appointmentReference: reference, status: "Queued (demo)" as const,
       };
-      return {
+      const cancelledState = {
         ...state,
         appointments: state.appointments.map((item) => item.id === appointment.id ? { ...item, status: "Cancelled" as const } : item),
         messages: state.messages.some((message) => message.id === confirmation.id)
           ? state.messages.map((message) => message.appointmentReference === reference && message.status === "Scheduled (demo)" ? { ...message, status: "Cancelled (demo)" as const } : message)
           : [confirmation, ...state.messages.map((message) => message.appointmentReference === reference && message.status === "Scheduled (demo)" ? { ...message, status: "Cancelled (demo)" as const } : message)].slice(0, 200),
       };
+      return releaseOpeningToWaitlist(cancelledState, appointment);
     });
     return { success: true, appointment: snapshot.state.appointments.find((item) => item.reference === reference), message: "The sample schedule is updated. No text was sent." };
   }
@@ -519,6 +562,27 @@ async function retellTool(name: string, args: JsonRecord, call: ToolCall, env: E
       ? state
       : ({ ...state, tasks: [{ ...task, id: taskId, dueAt: new Date(Date.now() + 7_200_000).toISOString(), status: "Open" as const }, ...state.tasks].slice(0, 100) }));
     return { success: true, message: "I added a sample follow-up for the front desk. No personal details were stored." };
+  }
+  if (name === "join_waitlist") {
+    const requestCallId = stringField(call.call_id, "call ID", 100);
+    const patient = stringField(args.patient_name, "sample patient", 60);
+    if (!allowedNames.has(patient)) throw new ApiError(400, "sample_name_only", "Use one of the fictional sample names in the demo.");
+    const appointmentType = stringField(args.appointment_type, "appointment type", 60);
+    if (!Object.hasOwn(serviceDurations, appointmentType)) throw new ApiError(400, "invalid_appointment_type", "Choose one of the sample appointment types.");
+    const preferredDate = stringField(args.preferred_date, "preferred date", 10);
+    if (!validDate(preferredDate)) throw new ApiError(400, "invalid_date", "Use a valid date like 2026-10-15.");
+    const timezone = validateTimezone(args.timezone);
+    const waitlistId = `wait-${await stableId(`${requestCallId}|${patient}|${appointmentType}|${preferredDate}|${timezone}`)}`;
+    let entry: WaitlistItem | undefined;
+    const snapshot = await mutateSnapshot(env, (state) => {
+      entry = state.waitlist.find((item) => item.id === waitlistId || (item.patient === patient && item.appointmentType === appointmentType
+        && item.preferredDate === preferredDate && item.timezone === timezone && item.status !== "Cancelled"));
+      if (entry) return state;
+      entry = { id: waitlistId, patient, appointmentType, preferredDate, timezone, createdAt: new Date().toISOString(), status: "Waiting" };
+      return { ...state, waitlist: [entry, ...state.waitlist].slice(0, 100) };
+    });
+    entry = snapshot.state.waitlist.find((item) => item.id === waitlistId) || entry;
+    return { success: true, waitlistRequest: entry, message: "The sample waitlist request was recorded. No text was sent." };
   }
   if (name === "check_document_status") {
     const reference = stringField(args.booking_reference, "sample booking reference", 20);
@@ -626,7 +690,7 @@ async function fetchHandler(request: Request, env: Env): Promise<Response> {
       await consumeLimit(request, env, "read");
       const body = await readJson(request);
       const date = stringField(body.date, "date", 10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new ApiError(400, "invalid_date", "Use a date like 2026-10-15.");
+      if (!validDate(date)) throw new ApiError(400, "invalid_date", "Use a valid date like 2026-10-15.");
       const type = stringField(body.appointmentType, "appointment type", 60);
       const timezone = validateTimezone(body.timezone);
       const snapshot = await loadSnapshot(env);

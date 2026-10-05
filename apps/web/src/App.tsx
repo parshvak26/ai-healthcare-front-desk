@@ -6,12 +6,13 @@ import { loadDemoState, resetDemoState, saveDemoState } from "./lib/store";
 import { addLocalDays, allTimezones, defaultLocalDateTime, formatDate, formatDateTime, formatTime, localDateTimeToUtc, marketTimezones, timezoneLabel } from "./lib/timezone";
 import type { Appointment, DemoState, FollowUpTask, Market } from "./types";
 
-type Page = "Overview" | "Appointments" | "Referrals" | "Follow-ups" | "Messages" | "FAQs" | "Settings";
-type CallIntent = "appointment" | "faq" | "callback" | "refill" | "records" | "billing" | "documents";
+type Page = "Overview" | "Appointments" | "Waitlist" | "Referrals" | "Follow-ups" | "Messages" | "FAQs" | "Settings";
+type CallIntent = "appointment" | "waitlist" | "faq" | "callback" | "refill" | "records" | "billing" | "documents";
 
 const pages: { name: Page; icon: string; group?: string }[] = [
   { name: "Overview", icon: "◈" },
   { name: "Appointments", icon: "▦", group: "FRONT DESK" },
+  { name: "Waitlist", icon: "↗" },
   { name: "Referrals", icon: "▤" },
   { name: "Follow-ups", icon: "◷" },
   { name: "Messages", icon: "◌" },
@@ -89,6 +90,21 @@ function localMorningOnSameDay(value: string, timezone: string) {
   return localDateTimeToUtc(`${date.year}-${date.month}-${date.day}T10:00`, timezone);
 }
 
+function localDateKey(value: string, timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date(value));
+  const date = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${date.year}-${date.month}-${date.day}`;
+}
+
+function validDateKey(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
 function mergeRows<T extends { id: string }>(base: T[], local: T[], remote: T[]) {
   const baseById = new Map(base.map((item) => [item.id, item]));
   const localById = new Map(local.map((item) => [item.id, item]));
@@ -111,6 +127,7 @@ function mergeDemoState(base: DemoState, local: DemoState, remote: DemoState): D
     tasks: mergeRows(base.tasks, local.tasks, remote.tasks),
     referrals: mergeRows(base.referrals, local.referrals, remote.referrals),
     messages: mergeRows(base.messages, local.messages, remote.messages),
+    waitlist: mergeRows(base.waitlist, local.waitlist, remote.waitlist),
   };
 }
 
@@ -128,6 +145,7 @@ function App() {
   const [clinicTimezone, setClinicTimezone] = useState("America/Chicago");
   const [displayTimezone, setDisplayTimezone] = useState("America/Los_Angeles");
   const [showBooking, setShowBooking] = useState(false);
+  const [showWaitlist, setShowWaitlist] = useState(false);
   const [showCallDemo, setShowCallDemo] = useState(false);
   const [toast, setToast] = useState("");
   const [search, setSearch] = useState("");
@@ -319,10 +337,62 @@ function App() {
         if (message.purpose === "24-hour appointment reminder") return { ...message, scheduledFor: new Date(Math.max(Date.now(), Date.parse(nextStartAt) - 24 * 60 * 60 * 1000)).toISOString() };
         return message;
       }),
+      ...(action === "cancel" && current.waitlist.some((item) => item.status === "Waiting"
+        && item.appointmentType === appointment.type
+        && item.preferredDate === localDateKey(appointment.startAt, item.timezone)) ? (() => {
+        const opening = current.waitlist.find((item) => item.status === "Waiting"
+          && item.appointmentType === appointment.type
+          && item.preferredDate === localDateKey(appointment.startAt, item.timezone));
+        if (!opening) return {};
+        const task: FollowUpTask = {
+          id: id("task"), title: "Waitlist follow-up", patient: opening.patient,
+          detail: "A sample opening is available; confirm the waitlist request with the sample patient.",
+          dueAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), priority: "Today", status: "Open",
+        };
+        return {
+          waitlist: current.waitlist.map((item) => item.id === opening.id ? { ...item, status: "Opening found" as const } : item),
+          tasks: [task, ...current.tasks].slice(0, 100),
+        };
+      })() : {}),
     }));
     const purpose = action === "reschedule" ? "Reschedule confirmation" : "Cancellation confirmation";
     addMessage(appointment.patient, purpose, `Your sample appointment has been ${action === "reschedule" ? "rescheduled" : "cancelled"}. This is a demo message; nothing was sent.`);
     setToast(action === "reschedule" ? "Appointment moved by one day in the demo" : "Appointment cancelled in the demo");
+  }
+
+  function joinWaitlist(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const patient = String(form.get("patient") || "").trim();
+    const appointmentType = String(form.get("appointmentType") || appointmentTypes[0]);
+    const preferredDate = String(form.get("preferredDate") || "");
+    if (!demoPatients.includes(patient) || !appointmentTypes.includes(appointmentType) || !validDateKey(preferredDate)) {
+      setToast("Choose a sample patient, appointment type, and valid date");
+      return;
+    }
+    if (state.waitlist.some((item) => item.patient === patient && item.appointmentType === appointmentType
+      && item.preferredDate === preferredDate && item.timezone === clinicTimezone && item.status !== "Cancelled")) {
+      setToast("That sample is already on the waitlist");
+      return;
+    }
+    const item = {
+      id: id("wait"), patient, appointmentType, preferredDate, timezone: clinicTimezone,
+      createdAt: new Date().toISOString(), status: "Waiting" as const,
+    };
+    setState((current) => ({ ...current, waitlist: [item, ...current.waitlist].slice(0, 100) }));
+    setShowWaitlist(false);
+    setPage("Waitlist");
+    setToast("Added to the sample waitlist. No message was sent.");
+  }
+
+  function cancelWaitlist(itemId: string) {
+    setState((current) => ({
+      ...current,
+      waitlist: current.waitlist.map((item) => item.id === itemId && ["Waiting", "Opening found"].includes(item.status)
+        ? { ...item, status: "Cancelled" }
+        : item),
+    }));
+    setToast("Sample waitlist request cancelled");
   }
 
   function markDocument(itemId: string) {
@@ -354,12 +424,16 @@ function App() {
       setShowBooking(true);
       return;
     }
+    if (intent === "waitlist") {
+      setShowWaitlist(true);
+      return;
+    }
     if (intent === "faq") {
       setPage("FAQs");
       setToast("Browse the approved answers. Unlisted questions go to staff.");
       return;
     }
-    const messages: Record<Exclude<CallIntent, "appointment">, [string, string, FollowUpTask["priority"]?]> = {
+    const messages: Record<Exclude<CallIntent, "appointment" | "waitlist">, [string, string, FollowUpTask["priority"]?]> = {
       faq: ["FAQ question", "The assistant uses approved clinic answers only. If it cannot find an answer, it offers staff follow-up."],
       callback: ["Call back requested", "Caller asked to speak with a member of the front desk.", "Today"],
       refill: ["Prescription request", "Request passed to staff. The demo does not approve or advise about medication."],
@@ -434,6 +508,7 @@ function App() {
             </div>
             <div className="heading-actions">
               <button className="button button-secondary" onClick={() => setShowCallDemo(true)}><span className="button-icon">◉</span> Simulate a call</button>
+              {page === "Waitlist" && <button className="button button-secondary" onClick={() => setShowWaitlist(true)}><span className="button-icon">↗</span> Join waitlist</button>}
               <button className="button button-primary" onClick={() => setShowBooking(true)}><span className="button-icon">＋</span> New appointment</button>
             </div>
           </div>
@@ -461,6 +536,7 @@ function App() {
 
           {page === "Overview" && <Overview state={state} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} onPage={setPage} onTask={updateTask} onCall={() => setShowCallDemo(true)} />}
           {page === "Appointments" && <Appointments appointments={appointments} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} onChange={changeAppointment} onBook={() => setShowBooking(true)} />}
+          {page === "Waitlist" && <Waitlist entries={state.waitlist} onCancel={cancelWaitlist} />}
           {page === "Referrals" && <Referrals state={state} clinicTimezone={clinicTimezone} onMark={markDocument} />}
           {page === "Follow-ups" && <FollowUps tasks={state.tasks} clinicTimezone={clinicTimezone} onUpdate={updateTask} />}
           {page === "Messages" && <Messages state={state} clinicTimezone={clinicTimezone} />}
@@ -472,6 +548,7 @@ function App() {
       </main>
 
       {showBooking && <BookingModal clinicTimezone={clinicTimezone} onClose={() => setShowBooking(false)} onSubmit={createAppointment} />}
+      {showWaitlist && <WaitlistModal clinicTimezone={clinicTimezone} onClose={() => setShowWaitlist(false)} onSubmit={joinWaitlist} />}
       {showCallDemo && <CallDemoModal onClose={() => setShowCallDemo(false)} onSelect={simulateCall} />}
       {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
     </div>
@@ -481,6 +558,7 @@ function App() {
 const pageDescriptions: Record<Page, string> = {
   Overview: "Here’s what needs your attention today.",
   Appointments: "Manage the sample schedule and appointment requests.",
+  Waitlist: "Track sample requests and follow up when a matching opening appears.",
   Referrals: "Track sample documents and referral follow-ups.",
   "Follow-ups": "Keep staff requests moving and close the loop.",
   Messages: "Review simulated confirmations, reminders, and opt-outs.",
@@ -583,6 +661,23 @@ function Appointments({ appointments, clinicTimezone, displayTimezone, onChange,
   </section>;
 }
 
+function Waitlist({ entries, onCancel }: { entries: DemoState["waitlist"]; onCancel: (id: string) => void }) {
+  const active = entries.filter((item) => item.status !== "Cancelled");
+  return <div className="stack-layout">
+    <div className="banner banner-demo"><span className="banner-icon">↗</span><div><strong>Sample waitlist</strong><span>When a matching appointment is cancelled, the front desk gets a follow-up task. The demo never books or texts someone automatically.</span></div><StatusPill tone="blue">No messages sent</StatusPill></div>
+    <section className="card full-card"><div className="card-heading"><div><h2>Waitlist requests</h2><p>Requests use fictional patients and a preferred clinic date.</p></div><StatusPill tone="amber">{`${active.length} active`}</StatusPill></div>
+      <div className="waitlist-list">{entries.map((item) => <article className="waitlist-entry" key={item.id}>
+        <Avatar name={item.patient} size="small" />
+        <div className="waitlist-person"><strong>{item.patient}</strong><span>{item.appointmentType}</span></div>
+        <div className="waitlist-date"><span>Preferred date</span><strong>{item.preferredDate}</strong><small>{timezoneLabel(item.timezone)}</small></div>
+        <StatusPill tone={item.status === "Opening found" || item.status === "Booked" ? "green" : item.status === "Cancelled" ? "neutral" : "amber"}>{item.status}</StatusPill>
+        {item.status === "Waiting" || item.status === "Opening found" ? <button className="row-text-action" onClick={() => onCancel(item.id)}>Cancel request</button> : <span className="waitlist-date">Added {formatDateTime(item.createdAt, item.timezone)}</span>}
+      </article>)}{entries.length === 0 && <EmptyState title="No waitlist requests" text="Add a fictional request to try the cancellation workflow." />}</div>
+      <div className="storage-note"><span>i</span><p>The demo stores no phone numbers or contact details. Staff must confirm a matching opening with the fictional sample patient.</p></div>
+    </section>
+  </div>;
+}
+
 function Referrals({ state, clinicTimezone, onMark }: { state: DemoState; clinicTimezone: string; onMark: (id: string) => void }) {
   return <div className="stack-layout">
     <div className="banner banner-safety"><span className="banner-icon">◇</span><div><strong>Sample files only</strong><span>Document uploads are simulated here. Never add a real referral or medical record to this demo.</span></div></div>
@@ -637,9 +732,21 @@ function BookingModal({ clinicTimezone, onClose, onSubmit }: { clinicTimezone: s
   </form></section></div>;
 }
 
+function WaitlistModal({ clinicTimezone, onClose, onSubmit }: { clinicTimezone: string; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="waitlist-title"><div className="modal-header"><div><span className="modal-kicker">SAMPLE WAITLIST</span><h2 id="waitlist-title">Add a waitlist request</h2><p>Use a fictional patient and preferred date.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><form onSubmit={onSubmit}>
+    <label className="form-label">Fictional patient<select name="patient" required defaultValue=""><option value="" disabled>Choose sample patient</option>{demoPatients.map((patient) => <option key={patient}>{patient}</option>)}</select></label>
+    <label className="form-label">Appointment type<select name="appointmentType">{appointmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
+    <label className="form-label">Preferred date<input type="date" name="preferredDate" required min={new Date().toISOString().slice(0, 10)} defaultValue={new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)} /></label>
+    <div className="timezone-hint"><span>◷</span> Preferred date uses clinic time: <strong>{timezoneLabel(clinicTimezone)}</strong></div>
+    <div className="modal-disclaimer">This creates a sample request. A staff task is made when a matching opening appears; no text is sent.</div>
+    <div className="modal-actions"><button type="button" className="button button-secondary" onClick={onClose}>Back</button><button type="submit" className="button button-primary">Add to sample waitlist <span>→</span></button></div>
+  </form></section></div>;
+}
+
 function CallDemoModal({ onClose, onSelect }: { onClose: () => void; onSelect: (intent: CallIntent) => void }) {
   const options: { id: CallIntent; icon: string; title: string; detail: string }[] = [
     { id: "appointment", icon: "▦", title: "Book an appointment", detail: "Try a sample booking flow" },
+    { id: "waitlist", icon: "↗", title: "Join a waitlist", detail: "Ask staff to contact a sample patient about an opening" },
     { id: "faq", icon: "?", title: "Ask a common question", detail: "See how approved answers work" },
     { id: "callback", icon: "◉", title: "Ask for a person", detail: "Add a callback to the staff queue" },
     { id: "documents", icon: "▤", title: "Ask about a referral", detail: "Create a document follow-up task" },
