@@ -53,6 +53,7 @@ Retell's own A2P SMS add-on for its Twilio numbers is limited to US numbers. Its
 - Reuse the current Supabase free project rather than create another one. Check its dashboard quotas before increasing usage.
 - Current Cloudflare documentation lists 100,000 Worker requests/day on the Free plan. [Cloudflare Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)
 - Retell lists voice AI at $0.07–$0.31/minute. A call can cost money even when used for testing, so live calls stay disabled until the owner explicitly chooses a budget and test number. [Retell pricing](https://www.retellai.com/pricing)
+- SMS prices differ sharply by destination. Snapshot checked 2026-10-05: Twilio lists U.S. SMS at $0.0083 per segment plus carrier fees, with A2P 10DLC registration costs and a $1.15/month long-code number; India outbound SMS is listed at $0.0832 per segment. Twilio's UAE guide says two-way SMS is not supported. These are not all-in quotes; check the selected country's current rate and sender rules before setup. [U.S. SMS pricing](https://www.twilio.com/en-us/sms/pricing/us), [India SMS pricing](https://www.twilio.com/en-us/sms/pricing/in), [UAE SMS guidelines](https://www.twilio.com/en-us/guidelines/ae/sms)
 - If any dashboard prompts for a paid plan, extra phone number, credit purchase, or paid SMS sender, stop before accepting it.
 
 ## Privacy and production boundary
