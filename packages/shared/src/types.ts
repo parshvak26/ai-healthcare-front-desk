@@ -1,7 +1,9 @@
 export type Market = "USA" | "UAE" | "Europe" | "India";
-export type AppointmentStatus = "Confirmed" | "Needs confirmation" | "Cancelled";
+export type AppointmentStatus = "Confirmed" | "Needs confirmation" | "Cancelled" | "Completed" | "Missed";
 export type TaskStatus = "Open" | "In progress" | "Done";
+export type TaskPriority = "Normal" | "Today" | "Urgent";
 export type DocumentStatus = "Needed" | "Received" | "In review";
+export type Channel = "Staff console" | "Voice assistant" | "Automation";
 
 export interface Appointment {
   id: string;
@@ -22,8 +24,9 @@ export interface FollowUpTask {
   patient: string;
   detail: string;
   dueAt: string;
-  priority: "Normal" | "Today" | "Urgent";
+  priority: TaskPriority;
   status: TaskStatus;
+  appointmentReference?: string;
 }
 
 export interface ReferralItem {
@@ -36,6 +39,14 @@ export interface ReferralItem {
   status: DocumentStatus;
 }
 
+export type MessageStatus =
+  | "Delivered (demo)"
+  | "Queued (demo)"
+  | "Scheduled (demo)"
+  | "Cancelled (demo)"
+  | "Suppressed (opt-out)"
+  | "Opt-out";
+
 export interface MessageItem {
   id: string;
   recipient: string;
@@ -44,8 +55,10 @@ export interface MessageItem {
   sentAt: string;
   scheduledFor?: string;
   appointmentReference?: string;
-  status: "Delivered (demo)" | "Queued (demo)" | "Scheduled (demo)" | "Cancelled (demo)" | "Opt-out";
+  status: MessageStatus;
 }
+
+export type WaitlistStatus = "Waiting" | "Opening found" | "Contacted" | "Booked" | "Cancelled";
 
 export interface WaitlistItem {
   id: string;
@@ -54,7 +67,39 @@ export interface WaitlistItem {
   preferredDate: string;
   timezone: string;
   createdAt: string;
-  status: "Waiting" | "Opening found" | "Contacted" | "Booked" | "Cancelled";
+  status: WaitlistStatus;
+}
+
+export type ActivityAction =
+  | "Appointment booked"
+  | "Appointment rescheduled"
+  | "Appointment cancelled"
+  | "Appointment confirmed"
+  | "Visit marked attended"
+  | "Visit marked missed"
+  | "Waitlist request added"
+  | "Waitlist request cancelled"
+  | "Waitlist opening found"
+  | "Document received"
+  | "Staff task created"
+  | "Staff task updated"
+  | "Text reminders turned off"
+  | "Text reminders turned on"
+  | "Sample data reset";
+
+export interface ActivityEvent {
+  id: string;
+  at: string;
+  action: ActivityAction;
+  channel: Channel;
+  patient?: string;
+  reference?: string;
+}
+
+export interface SmsPreference {
+  patient: string;
+  optedOut: boolean;
+  updatedAt: string;
 }
 
 export interface DemoState {
@@ -63,4 +108,57 @@ export interface DemoState {
   referrals: ReferralItem[];
   messages: MessageItem[];
   waitlist: WaitlistItem[];
+  events: ActivityEvent[];
+  smsPreferences: SmsPreference[];
+}
+
+export interface DemoSnapshot {
+  state: DemoState;
+  revision: number;
+}
+
+export interface AvailabilitySlot {
+  startAt: string;
+  timezone: string;
+  provider: string;
+  location: string;
+  /** Human-readable clinic-local time, for voice read-back and the console. */
+  localTime: string;
+}
+
+export type RequestType = "callback" | "refill" | "records" | "billing" | "documents" | "faq" | "accessibility" | "faq_review";
+
+export type DemoAction =
+  | { type: "book_appointment"; patient: string; appointmentType: string; startAt: string; timezone: string }
+  | { type: "reschedule_appointment"; reference: string; patient: string; newStartAt: string; timezone: string }
+  | { type: "cancel_appointment"; reference: string; patient: string }
+  | { type: "confirm_appointment"; reference: string; patient: string }
+  | { type: "record_attendance"; reference: string; outcome: "attended" | "missed" }
+  | { type: "join_waitlist"; patient: string; appointmentType: string; preferredDate: string; timezone: string }
+  | { type: "cancel_waitlist"; waitlistId: string }
+  | { type: "mark_document_received"; documentId: string }
+  | { type: "create_task"; requestType: RequestType }
+  | { type: "update_task"; taskId: string; status: TaskStatus }
+  | { type: "set_sms_preference"; patient: string; optedOut: boolean }
+  | { type: "reset_demo" };
+
+export type DemoActionType = DemoAction["type"];
+
+export interface ActionContext {
+  /** Milliseconds since epoch. Injected so the rules are deterministic and testable. */
+  now: number;
+  channel: Channel;
+  /** Idempotency key: the same key always produces the same record IDs, so retries cannot duplicate work. */
+  key: string;
+  random: () => number;
+}
+
+export interface ActionOutcome {
+  state: DemoState;
+  /** False when the action was already applied (an idempotent replay) or changed nothing. */
+  changed: boolean;
+  message: string;
+  appointment?: Appointment;
+  waitlistItem?: WaitlistItem;
+  task?: FollowUpTask;
 }

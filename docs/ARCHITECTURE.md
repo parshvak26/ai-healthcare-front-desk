@@ -2,8 +2,8 @@
 # AI Healthcare Front Desk — Architecture
 
 **Status:** Implementation architecture
-**Version:** 0.2
-**Date:** 2026-10-03  
+**Version:** 0.3
+**Date:** 2026-10-06  
 **Scope:** Architecture for the demo described in PRD.md. This is not a production clinical system.
 
 ## 1. Design goals
@@ -40,12 +40,13 @@ The Retell account is active and has a Healthcare draft agent without a phone nu
 
 ### Current implementation
 
-- The React staff console works with fictional sample appointments, waitlist requests, FAQs, document statuses, tasks, and messages.
-- If `VITE_API_BASE_URL` is empty, browser state stays in local storage. If set, the console loads and saves a shared synthetic demo snapshot through the Worker.
-- The Worker contains routes for state sync, FAQ search, appointment availability, and staff follow-up tasks, plus signed Retell custom-function and call-event endpoints.
-- The Worker uses a private `healthcare` schema in a separate free Supabase project. Its migration is in `supabase/migrations/`; only server-side RPC functions are exposed to the Worker, and the browser never connects to Supabase.
+- **Shared domain package.** `packages/shared/src` holds the fictional catalog, timezone helpers, the strict snapshot validator, slot and reminder rules, the approved-FAQ lookup, and `applyDemoAction` — the single function that performs every front-desk change. The browser, the Worker API, the Retell tools, and the reminder job all use it, so channels cannot drift apart.
+- **Server-authoritative writes.** In cloud mode the console sends one action at a time to `POST /api/demo/actions` with an idempotency key. The Worker applies it to the latest snapshot inside an optimistic-concurrency loop (revision check, up to four attempts) and returns the saved snapshot. The console updates only from that response, so it never shows a booking the server refused. The old whole-snapshot `PUT /api/demo/state` route is retired (HTTP 410).
+- **Idempotency.** Record IDs are derived from the idempotency key (`stableId`). Replaying the same request returns the original result without writing. Retell tools use the call ID plus the tool name and arguments as the key, so a repeated tool call in one conversation cannot double-book.
+- **Local mode.** If `VITE_API_BASE_URL` is empty, or the Worker is unreachable or older than API version 2, the console runs the same rules against a private copy in browser storage and says so on screen.
+- The Worker uses a private `healthcare` schema in a separate free Supabase project. Its migration is in `supabase/migrations/`; only server-side RPC functions are exposed to the Worker, and the browser never connects to Supabase. No schema change was needed for v2: new fields live inside the JSON snapshot, and older snapshots are upgraded on first read.
 - Healthcare has a different Supabase key from HVAC. The earlier D1 migration is retained as deployment history. The application no longer reads or writes the D1 database.
-- The Worker cron task marks due simulated messages as `Delivered (demo)`; it never sends a text.
+- The Worker cron task (every 15 minutes) marks due simulated texts as delivered, suppresses them after opt-out, or cancels them when the visit was cancelled or the document arrived. It writes only when something was due and never sends a text.
 - Referral/document handling is a sample checklist and status change. No file upload, private file bucket, OCR, or real record is stored.
 - The Healthcare Retell agent is a draft with no phone number. Voice actions are blocked by an empty caller allowlist, and SMS remains simulation-only.
 
@@ -145,7 +146,7 @@ Provider creation is controlled by explicit environment modes, such as VOICE_MOD
 
 ### 5.3 Reminder and follow-up job
 
-The demo creates simulated message records: a booking confirmation, a 24-hour appointment reminder, and a missing-document follow-up scheduled 48 hours after booking. Rescheduling updates the appointment reminder; cancelling an appointment or receiving the sample document cancels the corresponding simulated follow-up. With no API URL configured, records stay in the browser. When the Worker is configured, the synthetic snapshot is shared through the database. Messages remain simulations in either mode.
+The demo creates simulated message records: a booking confirmation, a 24-hour appointment reminder (skipped when the visit is less than a day away), and — for new patient visits and consultations — one missing-document follow-up 48 hours after booking (skipped if the visit comes first). Every simulated text is moved out of quiet hours (before 9 AM or after 8 PM clinic time) and is recorded as `Suppressed (opt-out)` for a patient who has replied STOP. Rescheduling moves the reminder; cancelling an appointment, recording a missed visit, or receiving the sample document cancels the matching pending texts. The reminder job re-checks opt-out, cancellation, and document status at delivery time. With no API URL configured, records stay in the browser and the same job runs there; when the Worker is configured, the synthetic snapshot is shared through the database. Messages remain simulations in either mode.
 
 For the later connected version:
 
@@ -228,17 +229,19 @@ All market-specific templates are configuration data, not prompt code.
 
 ## 8. API and event contracts
 
-Implemented routes in the current Worker:
+Implemented routes in the current Worker (API version 2, reported by `/api/health`):
 
-- GET /api/health
-- GET /api/demo/state and PUT /api/demo/state
-- GET /api/faqs
-- POST /api/appointments/availability
-- POST /api/tasks
-- POST /webhooks/retell/custom-function
-- POST /webhooks/retell/events
+- `GET /api/health` — status, `apiVersion`, database reachability, and the hard-wired `liveCallsEnabled: false` / `liveSmsEnabled: false`.
+- `GET /api/demo/state` — the shared synthetic snapshot and its revision.
+- `POST /api/demo/actions` — `{ idempotencyKey, action }`, where `action.type` is one of `book_appointment`, `reschedule_appointment`, `cancel_appointment`, `confirm_appointment`, `record_attendance`, `join_waitlist`, `cancel_waitlist`, `mark_document_received`, `create_task`, `update_task`, `set_sms_preference`, or `reset_demo`. Returns the saved snapshot and a result message. Unknown fields are rejected.
+- `POST /api/appointments/availability` — open slots for a date, appointment type, and clinic timezone.
+- `GET /api/faqs` — the approved FAQ list.
+- `POST /webhooks/retell/custom-function` — signed Retell tools: `get_availability`, `create_appointment`, `lookup_appointment`, `confirm_appointment`, `reschedule_appointment`, `cancel_appointment`, `join_waitlist`, `search_approved_faq`, `request_staff_followup`, `check_document_status`.
+- `POST /webhooks/retell/events` — signed call events; stores only the opaque call ID and event name.
 
-File upload, SMS-provider webhooks, user authentication, and real clinic administration are not implemented. The demo waitlist is synthetic and only creates a staff follow-up when a matching appointment is cancelled.
+Retell shows the agent only the HTTP status of a non-2xx response, so business outcomes (slot taken, booking not found) are returned as HTTP 200 with `success: false` and a message the agent can act on. Signature and allowlist failures stay 401/403.
+
+File upload, SMS-provider webhooks, user authentication, and real clinic administration are not implemented. The demo waitlist is synthetic and only creates a staff follow-up when a matching appointment is cancelled or moved.
 
 Voice tool requests use shared typed schemas, strict allowlists, size limits, and request IDs. Webhooks verify provider signatures against the raw request body, reject replays, and acknowledge promptly. Inbound message routes must first apply STOP/opt-out handling before ordinary intent processing.
 
@@ -261,7 +264,8 @@ For this demo:
 
 - Structured, privacy-minimized Worker logs with request/correlation IDs.
 - Idempotency on booking writes, webhook application, reminder creation, and send attempts.
-- Snapshot revision checks reject stale concurrent writes; the API checks demo appointments for conflicting provider times.
+- Snapshot revision checks reject stale concurrent writes; the action is re-applied to the newest snapshot, and the validator rejects any snapshot with overlapping provider times.
+- Automated tests (`npm test`) cover the shared rules and the Worker routes against an in-memory stand-in for the Supabase RPC functions, including Retell signature verification, the allowlist, idempotent replays, and the reminder job.
 - Outbox pattern stores intended messages before sending; delivery status is separate from appointment status.
 - Retry transient provider failures with capped backoff; do not retry permanent rejections indefinitely.
 - Staff task is created when an action cannot be safely completed.

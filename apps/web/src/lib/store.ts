@@ -1,32 +1,39 @@
-import { createSeedState } from "./demoData";
-import type { DemoState } from "../types";
+// Browser storage for local mode only. Cloud mode never relies on it. Storage can be unavailable (private
+// windows, blocked site data), so every access is guarded and the demo falls back to fresh sample data.
+import { createSeedState, normalizeDemoState } from "../../../../packages/shared/src/index.ts";
+import type { DemoSnapshot } from "../types";
 
-const storageKey = "healthcare-front-desk-demo-v1";
+const storageKey = "healthcare-front-desk-demo-v2";
+const legacyStorageKey = "healthcare-front-desk-demo-v1";
 
-export function loadDemoState(): DemoState {
-  try {
-    const saved = localStorage.getItem(storageKey);
-    if (saved) {
-      const parsed = JSON.parse(saved) as Partial<DemoState>;
-      if (Array.isArray(parsed.appointments) && Array.isArray(parsed.tasks) && Array.isArray(parsed.referrals) && Array.isArray(parsed.messages)) {
-        return { ...parsed, waitlist: Array.isArray(parsed.waitlist) ? parsed.waitlist : [] } as DemoState;
-      }
-    }
-  } catch {
-    // A broken local demo snapshot should fall back to the sample records.
-  }
-  return createSeedState();
+function read(key: string) {
+  try { return localStorage.getItem(key); } catch { return null; }
 }
 
-export function saveDemoState(state: DemoState) {
-  try {
-    localStorage.setItem(storageKey, JSON.stringify(state));
-  } catch {
-    // Keep the current session usable when browser storage is unavailable.
+export function loadLocalSnapshot(): DemoSnapshot {
+  const current = read(storageKey);
+  if (current) {
+    try {
+      const parsed = JSON.parse(current) as { state?: unknown; revision?: unknown };
+      const normalized = normalizeDemoState(parsed.state);
+      if (normalized) return { state: normalized.state, revision: Number.isInteger(parsed.revision) ? Number(parsed.revision) : 1 };
+    } catch { /* fall through to older data or fresh samples */ }
   }
+  const legacy = read(legacyStorageKey);
+  if (legacy) {
+    try {
+      const normalized = normalizeDemoState(JSON.parse(legacy));
+      if (normalized) return { state: normalized.state, revision: 1 };
+    } catch { /* ignore a broken copy */ }
+  }
+  return { state: createSeedState(), revision: 1 };
 }
 
-export function resetDemoState() {
-  localStorage.removeItem(storageKey);
-  return createSeedState();
+export function saveLocalSnapshot(snapshot: DemoSnapshot) {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(snapshot));
+    localStorage.removeItem(legacyStorageKey);
+  } catch {
+    // Keep the session usable when browser storage is unavailable.
+  }
 }

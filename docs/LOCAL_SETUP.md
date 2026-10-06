@@ -17,14 +17,20 @@ The website works locally with fictional sample data and does not need provider 
 - Book, move, or cancel fictional appointments.
 - Review approved admin FAQs, referral status, simulated messages, and the staff follow-up queue.
 - Use **Simulate a call** to explore appointment and staff handoff flows.
+- On the FAQ page, use **Test a caller question** to see exactly how the voice assistant would answer.
+- On the Messages page, simulate a patient replying STOP or START.
 - Open Settings and select **Reset sample data** to restore the examples.
+
+## Check your changes
+
+Run `npm run check`. It type-checks the shared rules, the Worker, and the website, runs the automated tests (`npm test`), and builds the website. The tests use an in-memory stand-in for the database and never contact Retell, Supabase, or an SMS provider.
 
 ## Optional local API
 
 The website works on its own with browser local storage. Connecting the local Worker to the shared API needs the Supabase server-side credentials and should use fictional data only.
 
 1. Add `SUPABASE_URL` and `SUPABASE_SECRET_KEY` to the ignored `apps/worker/.dev.vars` file using the example template.
-2. Run `npm run dev:api` to start the Worker at `http://localhost:8787`.
+2. Run `npm run dev:api` to start the Worker at `http://localhost:8787` (Wrangler 4.147 or newer is needed for the Worker's compatibility date; `npm ci` installs it).
 3. Copy `apps/web/.env.example` to `apps/web/.env.local` and set `VITE_API_BASE_URL=http://localhost:8787`.
 4. Restart `npm run dev` so the website connects to the local Worker.
 

@@ -10,8 +10,7 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true
+    "types": ["node"]
   },
-  "include": ["src/**/*.ts", "../../packages/shared/src/**/*.ts"]
+  "include": ["packages/shared/test/**/*.ts", "apps/worker/test/**/*.ts"]
 }

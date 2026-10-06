@@ -2,12 +2,21 @@
   "name": "ai-healthcare-front-desk",
   "private": true,
   "version": "0.1.0",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "npm run dev --workspace @healthcare-front-desk/web",
     "dev:api": "npm run dev --workspace @healthcare-front-desk/worker",
     "build": "npm run build --workspace @healthcare-front-desk/web",
+    "test": "node --experimental-strip-types --no-warnings --test packages/shared/test/*.test.ts apps/worker/test/*.test.ts",
+    "typecheck": "tsc -p packages/shared/tsconfig.json && tsc -p tsconfig.test.json && npm run typecheck:api",
     "typecheck:api": "npm run typecheck --workspace @healthcare-front-desk/worker",
+    "check": "npm run typecheck && npm test && npm run build",
     "deploy:api": "npm run deploy --workspace @healthcare-front-desk/worker"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1"
   }
 }

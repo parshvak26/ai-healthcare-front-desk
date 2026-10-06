@@ -7,12 +7,25 @@
 - Healthcare uses a separate Supabase project, keeping its service key separate from HVAC. The private schema migration is applied and verified. The Cloudflare Worker now targets the protected Supabase RPC functions; its encrypted Production secret is set, and `/api/health` confirms the database connection. The old D1 migration is retained as history.
 - The Cloudflare Worker API is deployed at `https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev`. It uses synthetic data, simulates reminders, and accepts Retell events only from configured test numbers.
 - Cloudflare persisted observability logs and preview URLs are disabled in the Worker configuration to keep the demo small and avoid unnecessary public preview endpoints. Use `wrangler tail` for temporary diagnostics when needed.
-- The Healthcare Retell draft has eight custom functions configured, including the waitlist. It is unpublished and has no phone number; the Worker's caller allowlist is empty, so tool actions are rejected until a test caller is explicitly configured.
+- The Healthcare Retell draft has ten custom functions configured (availability, book, look up, confirm, reschedule, cancel, waitlist, FAQ, staff follow-up, document status), each with a 15-second timeout and no retries. It is unpublished and has no phone number; the Worker's caller allowlist is empty, so tool actions are rejected until a test caller is explicitly configured.
 - SMS is mock-only. The Worker does not call an SMS provider, and the reminder job only updates fictional message records.
+
+## Releasing a change (order matters)
+
+The website and the Worker deploy separately. Deploy the **Worker first**, then the website, so the new website never talks to an older API. If the website does reach an older Worker, it detects the API version from `/api/health` and falls back to a private browser copy with an on-screen notice instead of breaking.
+
+From the project folder on your own computer (where Wrangler and GitHub are signed in):
+
+1. `npm ci` and `npm run check` — type-check, tests, and build. No network calls to Retell, Supabase, or any SMS provider are made by the tests.
+2. `npm run deploy:api` — deploys the Worker (free plan; no new resources are created).
+3. Open `https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev/api/health` and confirm `"apiVersion":2` and `"databaseConnected":true`.
+4. `git push origin main` — GitHub Actions type-checks, tests, builds, and publishes the website.
+
+The first request after the Worker update upgrades the stored snapshot in place (adds the activity history and text preferences). No Supabase migration is needed.
 
 ## Step 1 — Website
 
-The `Build and deploy demo website` workflow installs the locked dependencies, builds `apps/web`, and publishes it to GitHub Pages. The repository must use the **GitHub Actions** Pages source. The repository is public so Pages works on the free GitHub plan.
+The `Build and deploy demo website` workflow installs the locked dependencies, type-checks, runs the automated tests, builds `apps/web`, and publishes it to GitHub Pages. The repository must use the **GitHub Actions** Pages source. The repository is public so Pages works on the free GitHub plan.
 
 ## Step 2 — Private API and database
 
@@ -29,10 +42,10 @@ The Supabase secret is already stored in Cloudflare Production; never put it in 
 
 ## Step 3 — Retell voice setup
 
-The Healthcare draft agent and its eight custom functions are configured; the signed webhook key is stored as an encrypted Cloudflare Production secret. The agent has no phone number, and no caller is allowlisted. Keep it unpublished until a test market, number, and spend limit are chosen.
+The Healthcare draft agent and its ten custom functions are configured (see `retell/tools.json` and `retell/AGENT_PROMPT.md`, which mirror the dashboard); the signed webhook key is stored as an encrypted Cloudflare Production secret. The agent has no phone number, and no caller is allowlisted. Keep it unpublished until a test market, number, and spend limit are chosen.
 
 1. **Done:** The separate Healthcare demo agent exists; the HVAC agent is unchanged.
-2. **Done:** The prompt and functions in the Retell folder point to the custom-function Worker route.
+2. **Done:** The prompt and functions in the Retell folder point to the custom-function Worker route. Each function is POST, 15-second timeout, 0 retries, and "Payload: args only" off. Agent data storage is "Basic Attributes Only", two safety guardrails are on, and the maximum call duration is under 5 minutes.
 3. **Done:** Retell signs function requests. The Worker verifies X-Retell-Signature using the server-side API key; do not add a key as a custom request header or expose it to the website.
 4. **Pending:** Choose one pilot country, assign a Healthcare phone number, allowlist only your test number, and set a short call-duration and daily limit before any live test.
 5. Keep the call-event webhook unconfigured unless a specific event workflow is needed. Do not publish the agent or make a call as part of setup.

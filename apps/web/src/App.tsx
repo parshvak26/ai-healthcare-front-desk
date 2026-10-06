@@ -1,13 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
-import { faqEntries } from "./lib/demoData";
-import { apiBaseUrl, getRemoteDemoState, putRemoteDemoState, RemoteStateConflict } from "./lib/api";
-import { loadDemoState, resetDemoState, saveDemoState } from "./lib/store";
-import { addLocalDays, allTimezones, defaultLocalDateTime, formatDate, formatDateTime, formatTime, localDateTimeToUtc, marketTimezones, timezoneLabel } from "./lib/timezone";
-import type { Appointment, DemoState, FollowUpTask, Market } from "./types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
+import {
+  allowedDemoPatients, appointmentTypes, faqEntries, isOptedOut, requestTemplates, searchApprovedFaq,
+} from "../../../packages/shared/src/index.ts";
+import type { FaqSearchResult } from "../../../packages/shared/src/index.ts";
+import { ApiRequestError, apiBaseUrl, cloudBackend, createLocalBackend, getHealth, newIdempotencyKey, requiredApiVersion } from "./lib/api";
+import type { DemoBackend } from "./lib/api";
+import {
+  allTimezones, formatDate, formatDateKey, formatDateTime, formatTime, isClinicOpen, marketTimezones, nextOpenDateKey, timezoneLabel, todayKey,
+} from "./lib/timezone";
+import type {
+  ActivityEvent, Appointment, AvailabilitySlot, DemoAction, DemoSnapshot, DemoState, FollowUpTask, Market, RequestType,
+} from "./types";
 
 type Page = "Overview" | "Appointments" | "Waitlist" | "Referrals" | "Follow-ups" | "Messages" | "FAQs" | "Settings";
-type CallIntent = "appointment" | "waitlist" | "faq" | "callback" | "refill" | "records" | "billing" | "documents";
+type CallIntent = "appointment" | "waitlist" | "faq" | Exclude<RequestType, "faq" | "faq_review">;
+type Connection = "connecting" | "cloud" | "local" | "fallback";
+type Perform = (action: DemoAction, key?: string) => Promise<boolean>;
+interface Toast { tone: "success" | "error"; text: string }
 
 const pages: { name: Page; icon: string; group?: string }[] = [
   { name: "Overview", icon: "◈" },
@@ -21,17 +31,19 @@ const pages: { name: Page; icon: string; group?: string }[] = [
 ];
 
 const marketNames: Market[] = ["USA", "UAE", "Europe", "India"];
-const demoPatients = ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"];
-const appointmentTypes = ["New patient visit", "Follow-up visit", "Consultation", "Administrative call"];
-const serviceDurations: Record<string, number> = { "New patient visit": 60, "Follow-up visit": 30, Consultation: 45, "Administrative call": 15 };
-const demoProviders = [
-  { name: "Dr. Avery Chen", location: "Main clinic" },
-  { name: "Dr. Noah Rivera", location: "North clinic" },
-];
+const demoPatients: readonly string[] = allowedDemoPatients;
+const activeStatuses = new Set(["Confirmed", "Needs confirmation"]);
 
-function id(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-}
+const pageDescriptions: Record<Page, string> = {
+  Overview: "Here’s what needs your attention today.",
+  Appointments: "Manage the sample schedule and appointment requests.",
+  Waitlist: "Track sample requests and follow up when a matching opening appears.",
+  Referrals: "Track sample documents and referral follow-ups.",
+  "Follow-ups": "Keep staff requests moving and close the loop.",
+  Messages: "Review simulated confirmations, reminders, and opt-outs.",
+  FAQs: "Approved answers for common front desk questions.",
+  Settings: "Choose a market and review the demo service controls.",
+};
 
 function StatusPill({ children, tone = "neutral" }: { children: string; tone?: "neutral" | "green" | "amber" | "blue" | "red" }) {
   return <span className={`pill pill-${tone}`}><span className="pill-dot" />{children}</span>;
@@ -46,9 +58,10 @@ function formatShort(value: string, zone: string) {
   return formatDateTime(value, zone, { year: undefined });
 }
 
-function appointmentTone(status: Appointment["status"]): "green" | "amber" | "red" {
+function appointmentTone(status: Appointment["status"]): "green" | "amber" | "red" | "neutral" | "blue" {
   if (status === "Confirmed") return "green";
-  if (status === "Cancelled") return "red";
+  if (status === "Completed") return "blue";
+  if (status === "Cancelled" || status === "Missed") return "red";
   return "amber";
 }
 
@@ -58,88 +71,26 @@ function taskTone(priority: FollowUpTask["priority"]): "amber" | "red" | "neutra
   return "neutral";
 }
 
-function isDemoSlotOpen(startAt: string, appointmentType: string, timezone: string) {
-  const duration = serviceDurations[appointmentType];
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: timezone, weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).formatToParts(new Date(startAt));
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const hour = Number(values.hour);
-  const minute = Number(values.minute);
-  return Boolean(duration && ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(values.weekday)
-    && minute % 30 === 0 && hour * 60 + minute >= 8 * 60
-    && hour * 60 + minute + duration <= 17 * 60 && Date.parse(startAt) > Date.now());
-}
+const isPast = (appointment: Appointment, now: number) => Date.parse(appointment.startAt) <= now;
+const needsOutcome = (appointment: Appointment, now: number) => activeStatuses.has(appointment.status) && isPast(appointment, now);
 
-function providerForSlot(appointments: Appointment[], startAt: string, appointmentType: string, ignoreId?: string) {
-  const start = Date.parse(startAt);
-  const end = start + (serviceDurations[appointmentType] || 30) * 60_000;
-  return demoProviders.find((provider) => !appointments.some((item) => {
-    if (item.id === ignoreId || item.status === "Cancelled" || item.provider !== provider.name) return false;
-    const itemStart = Date.parse(item.startAt);
-    const itemEnd = itemStart + (serviceDurations[item.type] || 30) * 60_000;
-    return start < itemEnd && itemStart < end;
-  }));
-}
-
-function localMorningOnSameDay(value: string, timezone: string) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(new Date(value));
-  const date = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return localDateTimeToUtc(`${date.year}-${date.month}-${date.day}T10:00`, timezone);
-}
-
-function localDateKey(value: string, timezone: string) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(new Date(value));
-  const date = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${date.year}-${date.month}-${date.day}`;
-}
-
-function validDateKey(value: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const [year, month, day] = value.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
-}
-
-function mergeRows<T extends { id: string }>(base: T[], local: T[], remote: T[]) {
-  const baseById = new Map(base.map((item) => [item.id, item]));
-  const localById = new Map(local.map((item) => [item.id, item]));
-  const remoteById = new Map(remote.map((item) => [item.id, item]));
-  const merged = new Map(remoteById);
-  for (const id of baseById.keys()) if (!localById.has(id)) merged.delete(id);
-  for (const [id, item] of localById) {
-    const before = baseById.get(id);
-    if (!before || JSON.stringify(before) !== JSON.stringify(item)) merged.set(id, item);
-  }
-  return [
-    ...local.map((item) => merged.get(item.id)).filter((item): item is T => Boolean(item)),
-    ...remote.filter((item) => !localById.has(item.id)).map((item) => merged.get(item.id)).filter((item): item is T => Boolean(item)),
-  ];
-}
-
-function mergeDemoState(base: DemoState, local: DemoState, remote: DemoState): DemoState {
-  return {
-    appointments: mergeRows(base.appointments, local.appointments, remote.appointments),
-    tasks: mergeRows(base.tasks, local.tasks, remote.tasks),
-    referrals: mergeRows(base.referrals, local.referrals, remote.referrals),
-    messages: mergeRows(base.messages, local.messages, remote.messages),
-    waitlist: mergeRows(base.waitlist, local.waitlist, remote.waitlist),
-  };
+function useNow(intervalMs = 60_000) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return now;
 }
 
 function App() {
-  const [state, setState] = useState<DemoState>(loadDemoState);
-  const [cloudReady, setCloudReady] = useState(!apiBaseUrl);
-  const [cloudStatus, setCloudStatus] = useState(apiBaseUrl ? "connecting" : "local");
-  const cloudRevision = useRef<number | null>(null);
-  const cloudBaseState = useRef<DemoState | null>(null);
-  const latestState = useRef(state);
-  const syncQueue = useRef<Promise<void>>(Promise.resolve());
-  latestState.current = state;
+  const [connection, setConnection] = useState<Connection>("connecting");
+  const [fallbackReason, setFallbackReason] = useState("");
+  const [snapshot, setSnapshot] = useState<DemoSnapshot | null>(null);
+  const backendRef = useRef<DemoBackend | null>(null);
+  const localRef = useRef<ReturnType<typeof createLocalBackend> | null>(null);
+  const revisionRef = useRef(0);
+  const [busy, setBusy] = useState(false);
   const [page, setPage] = useState<Page>("Overview");
   const [market, setMarket] = useState<Market>("USA");
   const [clinicTimezone, setClinicTimezone] = useState("America/Chicago");
@@ -147,66 +98,99 @@ function App() {
   const [showBooking, setShowBooking] = useState(false);
   const [showWaitlist, setShowWaitlist] = useState(false);
   const [showCallDemo, setShowCallDemo] = useState(false);
-  const [toast, setToast] = useState("");
+  const [moving, setMoving] = useState<Appointment | null>(null);
+  const [toast, setToast] = useState<Toast | null>(null);
   const [search, setSearch] = useState("");
+  const now = useNow();
 
-  useEffect(() => {
-    if (!apiBaseUrl) return;
-    const controller = new AbortController();
-    getRemoteDemoState(controller.signal).then((snapshot) => {
-      cloudRevision.current = snapshot.revision;
-      cloudBaseState.current = snapshot.state;
-      setState(snapshot.state);
-      setCloudStatus("connected");
-      setCloudReady(true);
-    }).catch(() => {
-      if (controller.signal.aborted) return;
-      setCloudStatus("local");
-      setCloudReady(false);
-    });
-    return () => controller.abort();
+  const accept = useCallback((next: DemoSnapshot) => {
+    if (next.revision < revisionRef.current && backendRef.current?.kind === "cloud") return;
+    revisionRef.current = next.revision;
+    setSnapshot(next);
   }, []);
 
+  const startLocal = useCallback(async (reason: string) => {
+    const local = createLocalBackend();
+    localRef.current = local;
+    backendRef.current = local;
+    revisionRef.current = 0;
+    accept(await local.load());
+    setFallbackReason(reason);
+    setConnection(reason ? "fallback" : "local");
+  }, [accept]);
+
   useEffect(() => {
-    saveDemoState(state);
-    if (!apiBaseUrl || !cloudReady || cloudRevision.current === null) return;
-    const timer = window.setTimeout(() => {
-      setCloudStatus("saving");
-      syncQueue.current = syncQueue.current.catch(() => undefined).then(async () => {
-        const desired = latestState.current;
-        const revision = cloudRevision.current;
-        if (revision === null) return;
-        try {
-          const saved = await putRemoteDemoState({ state: desired, revision });
-          cloudBaseState.current = saved.state;
-          cloudRevision.current = saved.revision;
-        } catch (error) {
-          if (!(error instanceof RemoteStateConflict)) throw error;
-          const remote = await getRemoteDemoState(new AbortController().signal);
-          const localNow = latestState.current;
-          const merged = mergeDemoState(cloudBaseState.current || remote.state, localNow, remote.state);
-          const saved = await putRemoteDemoState({ state: merged, revision: remote.revision });
-          cloudBaseState.current = saved.state;
-          cloudRevision.current = saved.revision;
-          if (JSON.stringify(latestState.current) === JSON.stringify(localNow)
-            && JSON.stringify(merged) !== JSON.stringify(localNow)) setState(merged);
-        }
-        setCloudStatus("connected");
-      }).catch(() => setCloudStatus("sync issue"));
-    }, 500);
-    return () => window.clearTimeout(timer);
-  }, [state, cloudReady]);
+    let cancelled = false;
+    (async () => {
+      if (!apiBaseUrl) { await startLocal(""); return; }
+      try {
+        const health = await getHealth();
+        if (!health.databaseConnected) throw new ApiRequestError(503, "database_unavailable", "The cloud demo database is not reachable.");
+        if ((health.apiVersion ?? 1) < requiredApiVersion) throw new ApiRequestError(409, "api_outdated", "The cloud API is older than this website.");
+        const loaded = await cloudBackend.load();
+        if (cancelled) return;
+        backendRef.current = cloudBackend;
+        accept(loaded);
+        setConnection("cloud");
+      } catch (error) {
+        if (cancelled) return;
+        const reason = error instanceof ApiRequestError && error.code === "api_outdated"
+          ? "The cloud API has not been updated yet, so this browser is using its own private copy."
+          : "The cloud demo is unavailable, so this browser is using its own private copy.";
+        await startLocal(reason);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [accept, startLocal]);
+
+  const refresh = useCallback(async () => {
+    const backend = backendRef.current;
+    if (!backend) return;
+    try { accept(await backend.load()); } catch { /* keep the last good copy; the next poll retries */ }
+  }, [accept]);
+
+  // Keep the shared schedule fresh (for example after a voice booking), and run the local reminder simulation.
+  useEffect(() => {
+    if (connection === "connecting") return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      if (connection === "cloud") void refresh();
+      else { const ticked = localRef.current?.tick(); if (ticked) accept(ticked); }
+    }, connection === "cloud" ? 30_000 : 60_000);
+    const onVisible = () => { if (document.visibilityState === "visible" && connection === "cloud") void refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [connection, refresh, accept]);
+
   useEffect(() => {
     if (!toast) return;
-    const timer = window.setTimeout(() => setToast(""), 3200);
+    const timer = window.setTimeout(() => setToast(null), toast.tone === "error" ? 6000 : 3500);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const appointments = useMemo(
-    () => [...state.appointments].sort((a, b) => a.startAt.localeCompare(b.startAt)),
-    [state.appointments],
-  );
-  const openTasks = state.tasks.filter((task) => task.status !== "Done");
+  const perform: Perform = useCallback(async (action, key = newIdempotencyKey()) => {
+    const backend = backendRef.current;
+    if (!backend) return false;
+    setBusy(true);
+    try {
+      const response = await backend.perform(action, key);
+      accept(response);
+      setToast({ tone: "success", text: response.result.appointment && action.type === "book_appointment"
+        ? `Appointment confirmed · ${response.result.appointment.reference}`
+        : response.result.message });
+      return true;
+    } catch (error) {
+      const message = error instanceof ApiRequestError ? error.message : "The demo could not complete that request. Nothing was changed.";
+      setToast({ tone: "error", text: message });
+      if (error instanceof ApiRequestError && (error.uncertain || error.status === 409)) void refresh();
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }, [accept, refresh]);
+
+  const state = snapshot?.state;
+  const openTasks = useMemo(() => state?.tasks.filter((task) => task.status !== "Done") ?? [], [state]);
 
   function changeMarket(nextMarket: Market) {
     setMarket(nextMarket);
@@ -214,247 +198,30 @@ function App() {
     setDisplayTimezone(marketTimezones[nextMarket][0]);
   }
 
-  function addMessage(recipient: string, purpose: string, body: string) {
-    setState((current) => ({
-      ...current,
-      messages: [{ id: id("msg"), recipient, purpose, body, sentAt: new Date().toISOString(), status: "Queued (demo)" as const }, ...current.messages].slice(0, 200),
-    }));
-  }
-
-  function addTask(title: string, patient: string, detail: string, priority: FollowUpTask["priority"] = "Normal") {
-    const task: FollowUpTask = {
-      id: id("task"), title, patient, detail,
-      dueAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
-      priority, status: "Open",
-    };
-    setState((current) => ({ ...current, tasks: [task, ...current.tasks].slice(0, 100) }));
-    setToast("Added to the staff follow-up queue");
-  }
-
-  function createAppointment(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const patient = String(form.get("patient") || "").trim();
-    const appointmentType = String(form.get("appointmentType") || appointmentTypes[0]);
-    const localStart = String(form.get("startAt") || "");
-    if (!patient || !localStart) return;
-
-    let startAt: string;
-    try {
-      startAt = localDateTimeToUtc(localStart, clinicTimezone);
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "Choose a valid time");
-      return;
-    }
-
-    if (!isDemoSlotOpen(startAt, appointmentType, clinicTimezone)) {
-      setToast("Choose a future weekday slot from 8:00 AM to 5:00 PM, in 30-minute steps");
-      return;
-    }
-    const provider = providerForSlot(state.appointments, startAt, appointmentType);
-    if (!provider) {
-      setToast("No sample provider is free at that time");
-      return;
-    }
-
-    const reference = `DEMO-${Math.floor(1000 + Math.random() * 8999)}`;
-    const appointment: Appointment = {
-      id: id("apt"), patient, reference, type: appointmentType,
-      provider: provider.name, location: provider.location, startAt,
-      timezone: clinicTimezone,
-      status: "Confirmed", documents: appointmentType === "Follow-up visit" ? "Received" : "Needed",
-    };
-    setState((current) => ({
-      ...current,
-      appointments: [appointment, ...current.appointments].slice(0, 100),
-      referrals: appointment.documents === "Needed" ? [{
-        id: id("doc"), patient, reference, appointment: appointmentType,
-        document: "Referral letter · sample needed", status: "Needed" as const,
-      }, ...current.referrals].slice(0, 100) : current.referrals,
-      tasks: appointment.documents === "Needed" ? [{
-        id: id("task"), title: "Referral document missing", patient,
-        detail: "Check whether the sample referral has arrived; the 48-hour text remains simulated.",
-        dueAt: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(), priority: "Normal" as const, status: "Open" as const,
-      }, ...current.tasks].slice(0, 100) : current.tasks,
-      messages: [
-        {
-          id: id("msg"), recipient: `${patient} · ${reference}`, purpose: "Booking confirmation",
-          body: `Demo appointment confirmed for ${formatDateTime(startAt, clinicTimezone)} (${timezoneLabel(clinicTimezone)}). No text was sent.`,
-          sentAt: new Date().toISOString(), appointmentReference: reference, status: "Queued (demo)" as const,
-        },
-        {
-          id: id("msg"), recipient: `${patient} · ${reference}`, purpose: "24-hour appointment reminder",
-          body: `Reminder for your sample appointment at ${formatDateTime(startAt, clinicTimezone)} (${timezoneLabel(clinicTimezone)}). This text is not sent.`,
-          sentAt: new Date().toISOString(), scheduledFor: new Date(Math.max(Date.now(), Date.parse(startAt) - 24 * 60 * 60 * 1000)).toISOString(),
-          appointmentReference: reference, status: "Scheduled (demo)" as const,
-        },
-        ...(appointment.documents === "Needed" ? [{
-          id: id("msg"), recipient: `${patient} · ${reference}`, purpose: "48-hour missing-document follow-up",
-          body: "A sample referral is still marked as needed. This follow-up is simulated and will be cancelled if the sample is received.",
-          sentAt: new Date().toISOString(), scheduledFor: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(),
-          appointmentReference: reference, status: "Scheduled (demo)" as const,
-        }] : []),
-        ...current.messages,
-      ].slice(0, 200),
-    }));
-    setShowBooking(false);
-    setPage("Appointments");
-    setToast(`Appointment confirmed · ${reference}`);
-  }
-
-  function changeAppointment(appointment: Appointment, action: "reschedule" | "cancel") {
-    const actionLabel = action === "reschedule" ? "move this demo appointment to the next available day" : "cancel this demo appointment";
-    if (!window.confirm(`Would you like to ${actionLabel}? This only changes sample data.`)) return;
-    let nextStartAt = appointment.startAt;
-    let nextProvider = { name: appointment.provider, location: appointment.location };
-    if (action === "reschedule") {
-      try {
-        const baseStart = isDemoSlotOpen(appointment.startAt, appointment.type, clinicTimezone)
-          ? appointment.startAt
-          : localMorningOnSameDay(appointment.startAt, clinicTimezone);
-        let found = false;
-        for (let day = 1; day <= 31 && !found; day += 1) {
-          const candidate = addLocalDays(baseStart, day, clinicTimezone);
-          const available = isDemoSlotOpen(candidate, appointment.type, clinicTimezone)
-            ? providerForSlot(state.appointments, candidate, appointment.type, appointment.id)
-            : undefined;
-          if (available) { nextStartAt = candidate; nextProvider = available; found = true; }
-        }
-        if (!found) throw new Error("No sample opening was found in the next month. Choose another time.");
-      } catch (error) {
-        setToast(error instanceof Error ? error.message : "Choose another time");
-        return;
-      }
-    }
-    setState((current) => ({
-      ...current,
-      appointments: current.appointments.map((item) => item.id === appointment.id
-        ? { ...item, ...(action === "cancel" ? { status: "Cancelled" as const } : { startAt: nextStartAt, timezone: clinicTimezone, provider: nextProvider.name, location: nextProvider.location }) }
-        : item),
-      messages: current.messages.map((message) => {
-        if (message.appointmentReference !== appointment.reference || message.status !== "Scheduled (demo)") return message;
-        if (action === "cancel") return { ...message, status: "Cancelled (demo)" as const };
-        if (message.purpose === "24-hour appointment reminder") return { ...message, scheduledFor: new Date(Math.max(Date.now(), Date.parse(nextStartAt) - 24 * 60 * 60 * 1000)).toISOString() };
-        return message;
-      }),
-      ...(action === "cancel" && current.waitlist.some((item) => item.status === "Waiting"
-        && item.appointmentType === appointment.type
-        && item.preferredDate === localDateKey(appointment.startAt, item.timezone)) ? (() => {
-        const opening = current.waitlist.find((item) => item.status === "Waiting"
-          && item.appointmentType === appointment.type
-          && item.preferredDate === localDateKey(appointment.startAt, item.timezone));
-        if (!opening) return {};
-        const task: FollowUpTask = {
-          id: id("task"), title: "Waitlist follow-up", patient: opening.patient,
-          detail: "A sample opening is available; confirm the waitlist request with the sample patient.",
-          dueAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), priority: "Today", status: "Open",
-        };
-        return {
-          waitlist: current.waitlist.map((item) => item.id === opening.id ? { ...item, status: "Opening found" as const } : item),
-          tasks: [task, ...current.tasks].slice(0, 100),
-        };
-      })() : {}),
-    }));
-    const purpose = action === "reschedule" ? "Reschedule confirmation" : "Cancellation confirmation";
-    addMessage(appointment.patient, purpose, `Your sample appointment has been ${action === "reschedule" ? "rescheduled" : "cancelled"}. This is a demo message; nothing was sent.`);
-    setToast(action === "reschedule" ? "Appointment moved by one day in the demo" : "Appointment cancelled in the demo");
-  }
-
-  function joinWaitlist(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const patient = String(form.get("patient") || "").trim();
-    const appointmentType = String(form.get("appointmentType") || appointmentTypes[0]);
-    const preferredDate = String(form.get("preferredDate") || "");
-    if (!demoPatients.includes(patient) || !appointmentTypes.includes(appointmentType) || !validDateKey(preferredDate)) {
-      setToast("Choose a sample patient, appointment type, and valid date");
-      return;
-    }
-    if (state.waitlist.some((item) => item.patient === patient && item.appointmentType === appointmentType
-      && item.preferredDate === preferredDate && item.timezone === clinicTimezone && item.status !== "Cancelled")) {
-      setToast("That sample is already on the waitlist");
-      return;
-    }
-    const item = {
-      id: id("wait"), patient, appointmentType, preferredDate, timezone: clinicTimezone,
-      createdAt: new Date().toISOString(), status: "Waiting" as const,
-    };
-    setState((current) => ({ ...current, waitlist: [item, ...current.waitlist].slice(0, 100) }));
-    setShowWaitlist(false);
-    setPage("Waitlist");
-    setToast("Added to the sample waitlist. No message was sent.");
-  }
-
-  function cancelWaitlist(itemId: string) {
-    setState((current) => ({
-      ...current,
-      waitlist: current.waitlist.map((item) => item.id === itemId && ["Waiting", "Opening found"].includes(item.status)
-        ? { ...item, status: "Cancelled" }
-        : item),
-    }));
-    setToast("Sample waitlist request cancelled");
-  }
-
-  function markDocument(itemId: string) {
-    setState((current) => ({
-      ...current,
-      referrals: current.referrals.map((item) => item.id === itemId ? { ...item, status: "Received", receivedAt: new Date().toISOString() } : item),
-      appointments: current.appointments.map((appointment) => {
-        const referral = current.referrals.find((item) => item.id === itemId);
-        return referral && appointment.reference === referral.reference ? { ...appointment, documents: "Received" } : appointment;
-      }),
-      tasks: current.tasks.map((task) => task.title.toLowerCase().includes("document") && task.patient === current.referrals.find((item) => item.id === itemId)?.patient
-        ? { ...task, status: "Done" }
-        : task),
-      messages: current.messages.map((message) => message.appointmentReference === current.referrals.find((item) => item.id === itemId)?.reference && message.purpose === "48-hour missing-document follow-up" && message.status === "Scheduled (demo)"
-        ? { ...message, status: "Cancelled (demo)" }
-        : message),
-    }));
-    setToast("Sample document marked as received");
-  }
-
-  function updateTask(taskId: string, status: FollowUpTask["status"]) {
-    setState((current) => ({ ...current, tasks: current.tasks.map((task) => task.id === taskId ? { ...task, status } : task) }));
-    setToast(status === "Done" ? "Follow-up completed" : "Follow-up updated");
+  async function changeAppointment(appointment: Appointment, action: "cancel" | "confirm" | "attended" | "missed") {
+    if (action === "cancel" && !window.confirm(`Cancel ${appointment.patient}'s sample appointment (${appointment.reference})? This only changes demo data and sends no text.`)) return;
+    if (action === "cancel") await perform({ type: "cancel_appointment", reference: appointment.reference, patient: appointment.patient });
+    if (action === "confirm") await perform({ type: "confirm_appointment", reference: appointment.reference, patient: appointment.patient });
+    if (action === "attended" || action === "missed") await perform({ type: "record_attendance", reference: appointment.reference, outcome: action });
   }
 
   function simulateCall(intent: CallIntent) {
     setShowCallDemo(false);
-    if (intent === "appointment") {
-      setShowBooking(true);
-      return;
-    }
-    if (intent === "waitlist") {
-      setShowWaitlist(true);
-      return;
-    }
-    if (intent === "faq") {
-      setPage("FAQs");
-      setToast("Browse the approved answers. Unlisted questions go to staff.");
-      return;
-    }
-    const messages: Record<Exclude<CallIntent, "appointment" | "waitlist">, [string, string, FollowUpTask["priority"]?]> = {
-      faq: ["FAQ question", "The assistant uses approved clinic answers only. If it cannot find an answer, it offers staff follow-up."],
-      callback: ["Call back requested", "Caller asked to speak with a member of the front desk.", "Today"],
-      refill: ["Prescription request", "Request passed to staff. The demo does not approve or advise about medication."],
-      records: ["Medical records request", "Request captured for the records team. No records are accessed or released in the demo."],
-      billing: ["Billing question", "Question routed to the billing team. The demo does not confirm coverage or charges."],
-      documents: ["Referral document follow-up", "Caller needs help with the sample referral checklist."],
-    };
-    const [title, detail, priority] = messages[intent];
-    addTask(title, demoPatients[Math.floor(Math.random() * demoPatients.length)], detail, priority || "Normal");
-    setPage("Follow-ups");
+    if (intent === "appointment") { setShowBooking(true); return; }
+    if (intent === "waitlist") { setShowWaitlist(true); return; }
+    if (intent === "faq") { setPage("FAQs"); setToast({ tone: "success", text: "Try a caller question. Unlisted questions go to staff." }); return; }
+    void perform({ type: "create_task", requestType: intent }).then((ok) => { if (ok) setPage("Follow-ups"); });
   }
 
-  function resetDemo() {
-    if (!window.confirm("Reset the sample data and restore the original fictional clinic data? In cloud mode this changes the shared demo for all visitors; otherwise it resets this browser's copy.")) return;
-    setState(resetDemoState());
-    setPage("Overview");
-    setToast("Sample data restored");
+  async function resetDemo() {
+    const scope = connection === "cloud" ? "This changes the shared demo for every visitor." : "This resets this browser's private copy.";
+    if (!window.confirm(`Restore the original fictional clinic data? ${scope}`)) return;
+    if (await perform({ type: "reset_demo" })) setPage("Overview");
   }
 
-  const filteredFaqs = faqEntries.filter((entry) => `${entry.question} ${entry.answer} ${entry.category}`.toLowerCase().includes(search.toLowerCase()));
-  const pageTitle = page === "Overview" ? "Good morning, team" : page;
+  const pageTitle = page === "Overview" ? greeting(clinicTimezone, now) : page;
+  const indicator = connection === "connecting" ? "CONNECTING…" : connection === "cloud" ? "SHARED CLOUD DEMO · CALLS OFF" : connection === "fallback" ? "PRIVATE COPY · CLOUD UNAVAILABLE" : "LOCAL DEMO · CALLS OFF";
+  const assistantNote = connection === "cloud" ? "Shared cloud demo. No calls or texts are sent." : connection === "connecting" ? "Connecting to the demo…" : "Private browser copy. No calls or texts are sent.";
 
   return (
     <div className="app-shell">
@@ -472,8 +239,8 @@ function App() {
           {pages.map((item) => (
             <div key={item.name}>
               {item.group && <div className="nav-group-label">{item.group}</div>}
-              <button className={`nav-item ${page === item.name ? "nav-item-active" : ""}`} onClick={() => setPage(item.name)} aria-current={page === item.name ? "page" : undefined}>
-                <span className="nav-icon">{item.icon}</span><span>{item.name}</span>
+              <button className={`nav-item ${page === item.name ? "nav-item-active" : ""}`} onClick={() => setPage(item.name)} aria-current={page === item.name ? "page" : undefined} aria-label={item.name}>
+                <span className="nav-icon" aria-hidden="true">{item.icon}</span><span>{item.name}</span>
                 {item.name === "Follow-ups" && openTasks.length > 0 && <span className="nav-count">{openTasks.length}</span>}
               </button>
             </div>
@@ -482,8 +249,8 @@ function App() {
         <div className="sidebar-bottom">
           <div className="assistant-card">
             <div className="assistant-card-top"><span className="online-dot" />AI receptionist <span className="mock-tag">MOCK</span></div>
-            <p>{cloudStatus === "connected" || cloudStatus === "saving" ? "Shared cloud demo. No calls or texts are sent." : cloudStatus === "sync issue" ? "Cloud sync issue. No calls or texts are sent." : "Local demo mode. No calls or texts are sent."}</p>
-            <button className="assistant-link" onClick={() => setShowCallDemo(true)}>Try a sample call <span>↗</span></button>
+            <p>{assistantNote}</p>
+            <button className="assistant-link" onClick={() => setShowCallDemo(true)} disabled={!state}>Try a sample call <span>↗</span></button>
           </div>
           <div className="user-profile"><Avatar name="Owner" /><span><strong>Demo workspace</strong><small>Administrator</small></span><button className="more-button" aria-label="Profile options">···</button></div>
         </div>
@@ -493,8 +260,7 @@ function App() {
         <header className="topbar">
           <div className="breadcrumb"><span>Harbor Health</span><span className="crumb-divider">/</span><strong>{page}</strong></div>
           <div className="topbar-actions">
-            <span className="demo-indicator"><span className="online-dot" />{cloudStatus === "connected" ? "CLOUD DEMO · CALLS OFF" : cloudStatus === "saving" ? "SAVING SAMPLE DATA" : cloudStatus === "sync issue" ? "LOCAL COPY · SYNC ISSUE" : "LOCAL DEMO · CALLS OFF"}</span>
-            <button className="icon-button" aria-label="Notifications">♧<i /></button>
+            <span className={`demo-indicator ${connection === "fallback" ? "demo-indicator-warning" : ""}`} role="status"><span className="online-dot" />{busy ? "SAVING…" : indicator}</span>
             <Avatar name="Owner" size="small" />
           </div>
         </header>
@@ -502,16 +268,18 @@ function App() {
         <div className="page-content">
           <div className="page-heading-row">
             <div>
-              <div className="eyebrow">{new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric", timeZone: clinicTimezone }).format(new Date()).toUpperCase()} <span>·</span> {timezoneLabel(clinicTimezone)}</div>
+              <div className="eyebrow">{new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric", timeZone: clinicTimezone }).format(new Date(now)).toUpperCase()} <span>·</span> {timezoneLabel(clinicTimezone)} <span>·</span> {isClinicOpen(clinicTimezone, now) ? "OPEN NOW" : "CLOSED NOW"}</div>
               <h1>{pageTitle}</h1>
-              <p className="page-subtitle">{page === "Overview" ? "Here’s what needs your attention today." : pageDescriptions[page]}</p>
+              <p className="page-subtitle">{pageDescriptions[page]}</p>
             </div>
             <div className="heading-actions">
-              <button className="button button-secondary" onClick={() => setShowCallDemo(true)}><span className="button-icon">◉</span> Simulate a call</button>
-              {page === "Waitlist" && <button className="button button-secondary" onClick={() => setShowWaitlist(true)}><span className="button-icon">↗</span> Join waitlist</button>}
-              <button className="button button-primary" onClick={() => setShowBooking(true)}><span className="button-icon">＋</span> New appointment</button>
+              <button className="button button-secondary" onClick={() => setShowCallDemo(true)} disabled={!state}><span className="button-icon">◉</span> Simulate a call</button>
+              {page === "Waitlist" && <button className="button button-secondary" onClick={() => setShowWaitlist(true)} disabled={!state}><span className="button-icon">↗</span> Join waitlist</button>}
+              <button className="button button-primary" onClick={() => setShowBooking(true)} disabled={!state}><span className="button-icon">＋</span> New appointment</button>
             </div>
           </div>
+
+          {connection === "fallback" && <div className="banner banner-safety connection-banner"><span className="banner-icon">!</span><div><strong>Using a private copy</strong><span>{fallbackReason} Changes here are not shared and no calls or texts are sent.</span></div></div>}
 
           <section className="timezone-strip" aria-label="Market and timezone controls">
             <div className="market-control"><span className="control-icon">◎</span><label htmlFor="market-select">Market</label>
@@ -521,7 +289,7 @@ function App() {
             </div>
             <div className="control-divider" />
             <div className="market-control"><span className="control-icon">◷</span><label htmlFor="clinic-timezone">Clinic schedule</label>
-              <select id="clinic-timezone" value={clinicTimezone} onChange={(event) => setClinicTimezone(event.target.value)}>
+              <select id="clinic-timezone" value={clinicTimezone} onChange={(event) => setClinicTimezone(event.target.value)} title="New bookings and availability use this clinic timezone. Existing appointments keep their stored time.">
                 {marketTimezones[market].map((zone) => <option key={zone} value={zone}>{timezoneLabel(zone)}</option>)}
               </select>
             </div>
@@ -534,54 +302,79 @@ function App() {
             <span className="english-tag">ENGLISH</span>
           </section>
 
-          {page === "Overview" && <Overview state={state} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} onPage={setPage} onTask={updateTask} onCall={() => setShowCallDemo(true)} />}
-          {page === "Appointments" && <Appointments appointments={appointments} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} onChange={changeAppointment} onBook={() => setShowBooking(true)} />}
-          {page === "Waitlist" && <Waitlist entries={state.waitlist} onCancel={cancelWaitlist} />}
-          {page === "Referrals" && <Referrals state={state} clinicTimezone={clinicTimezone} onMark={markDocument} />}
-          {page === "Follow-ups" && <FollowUps tasks={state.tasks} clinicTimezone={clinicTimezone} onUpdate={updateTask} />}
-          {page === "Messages" && <Messages state={state} clinicTimezone={clinicTimezone} />}
-          {page === "FAQs" && <Faqs entries={filteredFaqs} search={search} onSearch={setSearch} onAskStaff={() => addTask("FAQ needs review", "Front desk", "A published demo FAQ was flagged for staff review. No caller text was stored.", "Normal")} />}
-          {page === "Settings" && <Settings market={market} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} onReset={resetDemo} />}
+          {!state && <section className="card loading-card" aria-busy="true"><div className="empty-state"><span>◌</span><strong>Loading the sample clinic…</strong><p>Fetching fictional appointments, tasks, and messages.</p></div></section>}
+          {state && <>
+            {page === "Overview" && <Overview state={state} now={now} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} onPage={setPage} onTask={(id) => void perform({ type: "update_task", taskId: id, status: "Done" })} onCall={() => setShowCallDemo(true)} busy={busy} />}
+            {page === "Appointments" && <Appointments state={state} now={now} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} busy={busy} onChange={changeAppointment} onMove={setMoving} onBook={() => setShowBooking(true)} />}
+            {page === "Waitlist" && <Waitlist entries={state.waitlist} busy={busy} onCancel={(id) => void perform({ type: "cancel_waitlist", waitlistId: id })} />}
+            {page === "Referrals" && <Referrals state={state} clinicTimezone={clinicTimezone} busy={busy} onMark={(id) => void perform({ type: "mark_document_received", documentId: id })} />}
+            {page === "Follow-ups" && <FollowUps tasks={state.tasks} clinicTimezone={clinicTimezone} busy={busy} onUpdate={(id, status) => void perform({ type: "update_task", taskId: id, status })} />}
+            {page === "Messages" && <Messages state={state} clinicTimezone={clinicTimezone} busy={busy} onPreference={(patient, optedOut) => void perform({ type: "set_sms_preference", patient, optedOut })} />}
+            {page === "FAQs" && <Faqs search={search} onSearch={setSearch} busy={busy} onAskStaff={() => void perform({ type: "create_task", requestType: "faq_review" })} onCreateTask={(requestType) => void perform({ type: "create_task", requestType })} />}
+            {page === "Settings" && <Settings market={market} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} connection={connection} busy={busy} onReset={resetDemo} />}
+          </>}
 
           <div className="footer-note"><span className="shield-icon">◇</span><span>Fictional demo · Use sample data only · Not for medical advice or real patient information</span><button onClick={() => setPage("Settings")}>Demo settings</button></div>
         </div>
       </main>
 
-      {showBooking && <BookingModal clinicTimezone={clinicTimezone} onClose={() => setShowBooking(false)} onSubmit={createAppointment} />}
-      {showWaitlist && <WaitlistModal clinicTimezone={clinicTimezone} onClose={() => setShowWaitlist(false)} onSubmit={joinWaitlist} />}
+      {showBooking && backendRef.current && <SlotModal mode="book" backend={backendRef.current} clinicTimezone={clinicTimezone} onClose={() => setShowBooking(false)}
+        onSubmit={async ({ patient, appointmentType, slot, key }) => {
+          const ok = await perform({ type: "book_appointment", patient, appointmentType, startAt: slot.startAt, timezone: slot.timezone }, key);
+          if (ok) { setShowBooking(false); setPage("Appointments"); }
+          return ok;
+        }} />}
+      {moving && backendRef.current && <SlotModal mode="move" appointment={moving} backend={backendRef.current} clinicTimezone={moving.timezone || clinicTimezone} onClose={() => setMoving(null)}
+        onSubmit={async ({ slot, key }) => {
+          const ok = await perform({ type: "reschedule_appointment", reference: moving.reference, patient: moving.patient, newStartAt: slot.startAt, timezone: slot.timezone }, key);
+          if (ok) setMoving(null);
+          return ok;
+        }} />}
+      {showWaitlist && <WaitlistModal clinicTimezone={clinicTimezone} busy={busy} onClose={() => setShowWaitlist(false)}
+        onSubmit={async (action, key) => {
+          const ok = await perform(action, key);
+          if (ok) { setShowWaitlist(false); setPage("Waitlist"); }
+        }} />}
       {showCallDemo && <CallDemoModal onClose={() => setShowCallDemo(false)} onSelect={simulateCall} />}
-      {toast && <div className="toast" role="status"><span>✓</span>{toast}</div>}
+      {toast && <div className={`toast ${toast.tone === "error" ? "toast-error" : ""}`} role={toast.tone === "error" ? "alert" : "status"}><span>{toast.tone === "error" ? "!" : "✓"}</span>{toast.text}</div>}
     </div>
   );
 }
 
-const pageDescriptions: Record<Page, string> = {
-  Overview: "Here’s what needs your attention today.",
-  Appointments: "Manage the sample schedule and appointment requests.",
-  Waitlist: "Track sample requests and follow up when a matching opening appears.",
-  Referrals: "Track sample documents and referral follow-ups.",
-  "Follow-ups": "Keep staff requests moving and close the loop.",
-  Messages: "Review simulated confirmations, reminders, and opt-outs.",
-  FAQs: "Approved answers for common front desk questions.",
-  Settings: "Choose a market and review the demo service controls.",
+function greeting(timeZone: string, now: number) {
+  const hour = Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone }).format(new Date(now)));
+  return hour < 12 ? "Good morning, team" : hour < 17 ? "Good afternoon, team" : "Good evening, team";
+}
+
+const activityIcons: Partial<Record<ActivityEvent["action"], [string, string]>> = {
+  "Appointment booked": ["✓", "green"], "Appointment confirmed": ["✓", "green"], "Visit marked attended": ["✓", "green"],
+  "Appointment rescheduled": ["↻", "blue"], "Appointment cancelled": ["×", "orange"], "Visit marked missed": ["!", "orange"],
+  "Document received": ["▤", "green"], "Waitlist opening found": ["↗", "blue"], "Waitlist request added": ["↗", "blue"],
+  "Text reminders turned off": ["⊘", "orange"], "Text reminders turned on": ["◌", "green"], "Sample data reset": ["↺", "blue"],
 };
 
-function Overview({ state, clinicTimezone, displayTimezone, onPage, onTask, onCall }: {
-  state: DemoState; clinicTimezone: string; displayTimezone: string; onPage: (page: Page) => void;
-  onTask: (id: string, status: FollowUpTask["status"]) => void; onCall: () => void;
+function Overview({ state, now, clinicTimezone, displayTimezone, onPage, onTask, onCall, busy }: {
+  state: DemoState; now: number; clinicTimezone: string; displayTimezone: string; onPage: (page: Page) => void;
+  onTask: (id: string) => void; onCall: () => void; busy: boolean;
 }) {
-  const upcoming = state.appointments.filter((item) => item.status !== "Cancelled").sort((a, b) => a.startAt.localeCompare(b.startAt)).slice(0, 4);
+  const today = todayKey(clinicTimezone, now);
+  const todays = state.appointments.filter((item) => item.status !== "Cancelled" && todayKey(clinicTimezone, Date.parse(item.startAt)) === today);
+  const upcoming = state.appointments.filter((item) => activeStatuses.has(item.status) && !isPast(item, now)).sort((a, b) => a.startAt.localeCompare(b.startAt)).slice(0, 4);
   const open = state.tasks.filter((item) => item.status !== "Done").sort((a, b) => a.dueAt.localeCompare(b.dueAt)).slice(0, 3);
   const pendingDocs = state.referrals.filter((item) => item.status !== "Received").length;
-  const dueMessages = state.messages.filter((item) => item.status === "Queued (demo)" || item.status === "Scheduled (demo)").length;
+  const plannedTexts = state.messages.filter((item) => item.status === "Queued (demo)" || item.status === "Scheduled (demo)").length;
+  const awaitingOutcome = state.appointments.filter((item) => needsOutcome(item, now)).length;
+  const events = state.events.slice(0, 5);
 
   return <>
     <div className="stats-grid">
-      <StatCard label="Appointments today" value={String(state.appointments.filter((item) => item.status !== "Cancelled" && new Date(item.startAt).getTime() < Date.now() + 24 * 60 * 60 * 1000).length)} note="Across both locations" icon="▦" color="blue" />
-      <StatCard label="Needs follow-up" value={String(state.tasks.filter((item) => item.status !== "Done").length)} note="Requests from callers" icon="◷" color="purple" />
+      <StatCard label="Appointments today" value={String(todays.length)} note={`Clinic date · ${formatDateKey(today)}`} icon="▦" color="blue" />
+      <StatCard label="Needs follow-up" value={String(state.tasks.filter((item) => item.status !== "Done").length)} note="Requests from callers and staff" icon="◷" color="purple" />
       <StatCard label="Documents pending" value={String(pendingDocs)} note="Sample referrals and forms" icon="▤" color="orange" />
-      <StatCard label="Texts planned" value={String(dueMessages)} note="Simulation only · not sent" icon="◌" color="green" />
+      <StatCard label="Texts planned" value={String(plannedTexts)} note="Simulation only · not sent" icon="◌" color="green" />
     </div>
+
+    {awaitingOutcome > 0 && <button className="banner banner-demo banner-button" onClick={() => onPage("Appointments")}><span className="banner-icon">!</span><div><strong>{awaitingOutcome === 1 ? "1 past visit needs an outcome" : `${awaitingOutcome} past visits need an outcome`}</strong><span>Mark each one attended or missed. A missed visit creates a rebooking follow-up.</span></div><span className="text-button">Review →</span></button>}
 
     <div className="content-grid overview-grid">
       <section className="card appointments-card">
@@ -596,7 +389,7 @@ function Overview({ state, clinicTimezone, displayTimezone, onPage, onTask, onCa
       <section className="card tasks-card">
         <div className="card-heading"><div><h2>Needs attention</h2><p>Front desk follow-ups</p></div><button className="small-circle-button" onClick={() => onPage("Follow-ups")} aria-label="View all follow-ups">↗</button></div>
         <div className="attention-list">
-          {open.map((task) => <div className="attention-item" key={task.id}><span className={`attention-mark mark-${taskTone(task.priority)}`}>{task.priority === "Today" ? "!" : "·"}</span><div className="attention-copy"><div className="attention-title">{task.title}</div><div className="attention-detail">{task.patient} · due {formatShort(task.dueAt, clinicTimezone)}</div></div><button className="check-button" onClick={() => onTask(task.id, "Done")} aria-label={`Complete ${task.title}`}>✓</button></div>)}
+          {open.map((task) => <div className="attention-item" key={task.id}><span className={`attention-mark mark-${taskTone(task.priority)}`}>{task.priority === "Today" ? "!" : "·"}</span><div className="attention-copy"><div className="attention-title">{task.title}</div><div className="attention-detail">{task.patient} · {Date.parse(task.dueAt) < now ? "overdue since" : "due"} {formatShort(task.dueAt, clinicTimezone)}</div></div><button className="check-button" disabled={busy} onClick={() => onTask(task.id)} aria-label={`Complete ${task.title}`}>✓</button></div>)}
           {open.length === 0 && <EmptyState title="All caught up" text="New staff requests will appear here." />}
         </div>
         <button className="list-footer-button" onClick={() => onPage("Follow-ups")}>View follow-up queue <span>→</span></button>
@@ -605,11 +398,13 @@ function Overview({ state, clinicTimezone, displayTimezone, onPage, onTask, onCa
 
     <div className="content-grid lower-grid">
       <section className="card activity-card">
-        <div className="card-heading"><div><h2>Recent front desk activity</h2><p>Updates across calls, visits, and documents</p></div><button className="text-button" onClick={() => onPage("Messages")}>Message log <span>→</span></button></div>
+        <div className="card-heading"><div><h2>Recent front desk activity</h2><p>Changes from the console, the voice assistant, and automation</p></div><button className="text-button" onClick={() => onPage("Messages")}>Message log <span>→</span></button></div>
         <div className="activity-list">
-          <Activity icon="✓" color="green" title="Appointment confirmed" detail="Maya Patel · New patient visit" time={formatShort(state.appointments[0]?.startAt || new Date().toISOString(), displayTimezone)} />
-          <Activity icon="▤" color="orange" title="Referral still needed" detail="Jordan Lee · Follow-up visit" time="Follow-up due tomorrow" />
-          <Activity icon="↗" color="blue" title="Call-back requested" detail="Samira Khan · Location question" time="Added to staff queue" />
+          {events.map((event) => {
+            const [icon, color] = activityIcons[event.action] ?? ["•", "blue"];
+            return <Activity key={event.id} icon={icon} color={color} title={event.action} detail={[event.patient, event.reference, event.channel].filter(Boolean).join(" · ")} time={formatShort(event.at, displayTimezone)} />;
+          })}
+          {events.length === 0 && <EmptyState title="No activity yet" text="Bookings, changes, and staff requests will appear here." />}
         </div>
       </section>
       <section className="card assistant-summary-card">
@@ -640,121 +435,239 @@ function AppointmentRow({ appointment, clinicTimezone, displayTimezone, compact 
   </div>;
 }
 
-function Appointments({ appointments, clinicTimezone, displayTimezone, onChange, onBook }: {
-  appointments: Appointment[]; clinicTimezone: string; displayTimezone: string;
-  onChange: (appointment: Appointment, action: "reschedule" | "cancel") => void; onBook: () => void;
+function Appointments({ state, now, clinicTimezone, displayTimezone, busy, onChange, onMove, onBook }: {
+  state: DemoState; now: number; clinicTimezone: string; displayTimezone: string; busy: boolean;
+  onChange: (appointment: Appointment, action: "cancel" | "confirm" | "attended" | "missed") => void; onMove: (appointment: Appointment) => void; onBook: () => void;
 }) {
-  const [filter, setFilter] = useState("All appointments");
-  const visible = appointments.filter((appointment) => filter === "All appointments" || appointment.status === filter);
-  return <section className="card full-card">
-    <div className="card-heading card-heading-wide"><div><h2>Appointment schedule</h2><p>Sample appointments use the clinic timezone for scheduling.</p></div><div className="inline-actions"><select className="filter-select" value={filter} onChange={(event) => setFilter(event.target.value)}><option>All appointments</option><option>Confirmed</option><option>Needs confirmation</option><option>Cancelled</option></select><button className="button button-primary button-small" onClick={onBook}>＋ Book appointment</button></div></div>
+  const [filter, setFilter] = useState("Upcoming");
+  const [query, setQuery] = useState("");
+  const appointments = useMemo(() => [...state.appointments].sort((a, b) => a.startAt.localeCompare(b.startAt)), [state.appointments]);
+  const needle = query.trim().toLowerCase();
+  const visible = appointments.filter((item) => {
+    if (needle && !`${item.patient} ${item.reference} ${item.type}`.toLowerCase().includes(needle)) return false;
+    if (filter === "Upcoming") return activeStatuses.has(item.status) && !isPast(item, now);
+    if (filter === "Needs outcome") return needsOutcome(item, now);
+    return filter === "All appointments" || item.status === filter;
+  });
+  const history = state.events.filter((event) => event.reference && ["Appointment booked", "Appointment rescheduled", "Appointment cancelled", "Appointment confirmed", "Visit marked attended", "Visit marked missed"].includes(event.action)).slice(0, 8);
+  return <div className="stack-layout"><section className="card full-card">
+    <div className="card-heading card-heading-wide"><div><h2>Appointment schedule</h2><p>Bookings use real-time sample availability in the clinic timezone.</p></div><div className="inline-actions">
+      <div className="search-wrap search-compact"><span>⌕</span><input aria-label="Search appointments" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Name or DEMO reference" /></div>
+      <select className="filter-select" aria-label="Filter appointments" value={filter} onChange={(event) => setFilter(event.target.value)}><option>Upcoming</option><option>Needs outcome</option><option>All appointments</option><option>Confirmed</option><option>Needs confirmation</option><option>Completed</option><option>Missed</option><option>Cancelled</option></select>
+      <button className="button button-primary button-small" onClick={onBook}>＋ Book appointment</button></div></div>
     <div className="table-head appointment-table-head"><span>DATE</span><span>PATIENT</span><span>CLINIC TIME / YOUR TIME</span><span>PROVIDER</span><span>STATUS</span><span>ACTIONS</span></div>
-    <div className="table-list">{visible.map((appointment) => <div className="table-row appointment-table-row" key={appointment.id}>
-      <div className="date-stack"><strong>{formatDate(appointment.startAt, clinicTimezone)}</strong><span>{formatTime(appointment.startAt, clinicTimezone)} clinic</span></div>
-      <div className="patient-cell"><Avatar name={appointment.patient} size="small" /><div><strong>{appointment.patient}</strong><span>{appointment.reference} · {appointment.type}</span></div></div>
-      <div className="dual-time"><strong>{formatTime(appointment.startAt, clinicTimezone)}</strong><span>{formatTime(appointment.startAt, displayTimezone)} viewer</span></div>
-      <div className="provider-cell"><strong>{appointment.provider}</strong><span>{appointment.location}</span></div>
-      <StatusPill tone={appointmentTone(appointment.status)}>{appointment.status}</StatusPill>
-      <div className="row-actions">{appointment.status !== "Cancelled" && <><button onClick={() => onChange(appointment, "reschedule")}>Move</button><button className="action-danger" onClick={() => onChange(appointment, "cancel")}>Cancel</button></>}</div>
-    </div>)}{visible.length === 0 && <EmptyState title="No appointments here" text="Try a different filter or book a sample appointment." />}</div>
-    <div className="table-foot"><span>{visible.length} sample appointments</span><span>All times stored as UTC · shown in selected zones</span></div>
-  </section>;
+    <div className="table-list">{visible.map((appointment) => {
+      const zone = appointment.timezone || clinicTimezone;
+      const future = !isPast(appointment, now);
+      return <div className="table-row appointment-table-row" key={appointment.id}>
+        <div className="date-stack"><strong>{formatDate(appointment.startAt, zone)}</strong><span>{formatTime(appointment.startAt, zone)} clinic</span></div>
+        <div className="patient-cell"><Avatar name={appointment.patient} size="small" /><div><strong>{appointment.patient}</strong><span>{appointment.reference} · {appointment.type}</span></div></div>
+        <div className="dual-time"><strong>{formatTime(appointment.startAt, zone)}</strong><span>{formatTime(appointment.startAt, displayTimezone)} viewer</span></div>
+        <div className="provider-cell"><strong>{appointment.provider}</strong><span>{appointment.location}</span></div>
+        <StatusPill tone={appointmentTone(appointment.status)}>{appointment.status}</StatusPill>
+        <div className="row-actions">
+          {future && appointment.status === "Needs confirmation" && <button disabled={busy} onClick={() => onChange(appointment, "confirm")}>Confirm</button>}
+          {future && activeStatuses.has(appointment.status) && <><button disabled={busy} onClick={() => onMove(appointment)}>Move</button><button className="action-danger" disabled={busy} onClick={() => onChange(appointment, "cancel")}>Cancel</button></>}
+          {needsOutcome(appointment, now) && <><button disabled={busy} onClick={() => onChange(appointment, "attended")}>Attended</button><button className="action-danger" disabled={busy} onClick={() => onChange(appointment, "missed")}>No-show</button></>}
+        </div>
+      </div>;
+    })}{visible.length === 0 && <EmptyState title="No appointments here" text="Try a different filter or book a sample appointment." />}</div>
+    <div className="table-foot"><span>{visible.length} of {appointments.length} sample appointments</span><span>Stored as UTC · shown in clinic and viewer time</span></div>
+  </section>
+  <section className="card full-card"><div className="card-heading"><div><h2>Change history</h2><p>Who changed which sample booking, and through which channel.</p></div></div>
+    <div className="activity-list history-list">{history.map((event) => <Activity key={event.id} icon={activityIcons[event.action]?.[0] ?? "•"} color={activityIcons[event.action]?.[1] ?? "blue"} title={`${event.action} · ${event.reference}`} detail={`${event.patient ?? ""} · ${event.channel}`} time={formatShort(event.at, displayTimezone)} />)}
+      {history.length === 0 && <EmptyState title="No changes recorded yet" text="Bookings, moves, cancellations, and visit outcomes appear here." />}</div>
+  </section></div>;
 }
 
-function Waitlist({ entries, onCancel }: { entries: DemoState["waitlist"]; onCancel: (id: string) => void }) {
-  const active = entries.filter((item) => item.status !== "Cancelled");
+function Waitlist({ entries, busy, onCancel }: { entries: DemoState["waitlist"]; busy: boolean; onCancel: (id: string) => void }) {
+  const active = entries.filter((item) => item.status === "Waiting" || item.status === "Opening found");
   return <div className="stack-layout">
-    <div className="banner banner-demo"><span className="banner-icon">↗</span><div><strong>Sample waitlist</strong><span>When a matching appointment is cancelled, the front desk gets a follow-up task. The demo never books or texts someone automatically.</span></div><StatusPill tone="blue">No messages sent</StatusPill></div>
+    <div className="banner banner-demo"><span className="banner-icon">↗</span><div><strong>Sample waitlist</strong><span>When a matching appointment is cancelled or moved, the front desk gets a follow-up task. The demo never books or texts someone automatically.</span></div><StatusPill tone="blue">No messages sent</StatusPill></div>
     <section className="card full-card"><div className="card-heading"><div><h2>Waitlist requests</h2><p>Requests use fictional patients and a preferred clinic date.</p></div><StatusPill tone="amber">{`${active.length} active`}</StatusPill></div>
       <div className="waitlist-list">{entries.map((item) => <article className="waitlist-entry" key={item.id}>
         <Avatar name={item.patient} size="small" />
         <div className="waitlist-person"><strong>{item.patient}</strong><span>{item.appointmentType}</span></div>
-        <div className="waitlist-date"><span>Preferred date</span><strong>{item.preferredDate}</strong><small>{timezoneLabel(item.timezone)}</small></div>
+        <div className="waitlist-date"><span>Preferred date</span><strong>{formatDateKey(item.preferredDate)}</strong><small>{timezoneLabel(item.timezone)}</small></div>
         <StatusPill tone={item.status === "Opening found" || item.status === "Booked" ? "green" : item.status === "Cancelled" ? "neutral" : "amber"}>{item.status}</StatusPill>
-        {item.status === "Waiting" || item.status === "Opening found" ? <button className="row-text-action" onClick={() => onCancel(item.id)}>Cancel request</button> : <span className="waitlist-date">Added {formatDateTime(item.createdAt, item.timezone)}</span>}
+        {item.status === "Waiting" || item.status === "Opening found" ? <button className="row-text-action" disabled={busy} onClick={() => onCancel(item.id)}>Cancel request</button> : <span className="waitlist-date">Added {formatDateTime(item.createdAt, item.timezone)}</span>}
       </article>)}{entries.length === 0 && <EmptyState title="No waitlist requests" text="Add a fictional request to try the cancellation workflow." />}</div>
       <div className="storage-note"><span>i</span><p>The demo stores no phone numbers or contact details. Staff must confirm a matching opening with the fictional sample patient.</p></div>
     </section>
   </div>;
 }
 
-function Referrals({ state, clinicTimezone, onMark }: { state: DemoState; clinicTimezone: string; onMark: (id: string) => void }) {
+function Referrals({ state, clinicTimezone, busy, onMark }: { state: DemoState; clinicTimezone: string; busy: boolean; onMark: (id: string) => void }) {
+  const next = state.referrals.find((item) => item.status !== "Received");
   return <div className="stack-layout">
     <div className="banner banner-safety"><span className="banner-icon">◇</span><div><strong>Sample files only</strong><span>Document uploads are simulated here. Never add a real referral or medical record to this demo.</span></div></div>
-    <section className="card full-card"><div className="card-heading"><div><h2>Referral & document checklist</h2><p>Track what's needed before each sample visit.</p></div><button className="button button-secondary button-small" disabled={!state.referrals.some((item) => item.status !== "Received")} onClick={() => { const next = state.referrals.find((item) => item.status !== "Received"); if (next) onMark(next.id); }}>＋ Mark next sample received</button></div>
-      <div className="document-list">{state.referrals.map((item) => <div className="document-row" key={item.id}><div className="file-icon">▤</div><div className="document-main"><strong>{item.document}</strong><span>{item.patient} · {item.reference} · {item.appointment}</span></div><div className="document-date">{item.receivedAt ? `Received ${formatDateTime(item.receivedAt, clinicTimezone)}` : "Waiting for sample"}</div><StatusPill tone={item.status === "Received" ? "green" : item.status === "In review" ? "blue" : "amber"}>{item.status}</StatusPill><button className="row-text-action" disabled={item.status === "Received"} onClick={() => onMark(item.id)}>{item.status === "Received" ? "Complete" : item.status === "In review" ? "Mark reviewed" : "Mark sample received"}</button></div>)}</div>
+    <section className="card full-card"><div className="card-heading"><div><h2>Referral & document checklist</h2><p>Track what's needed before each sample visit.</p></div><button className="button button-secondary button-small" disabled={!next || busy} onClick={() => { if (next) onMark(next.id); }}>＋ Mark next sample received</button></div>
+      <div className="document-list">{state.referrals.map((item) => <div className="document-row" key={item.id}><div className="file-icon">▤</div><div className="document-main"><strong>{item.document}</strong><span>{item.patient} · {item.reference} · {item.appointment}</span></div><div className="document-date">{item.receivedAt ? `Received ${formatDateTime(item.receivedAt, clinicTimezone)}` : "Waiting for sample"}</div><StatusPill tone={item.status === "Received" ? "green" : item.status === "In review" ? "blue" : "amber"}>{item.status}</StatusPill><button className="row-text-action" disabled={item.status === "Received" || busy} onClick={() => onMark(item.id)}>{item.status === "Received" ? "Complete" : item.status === "In review" ? "Mark reviewed" : "Mark sample received"}</button></div>)}
+        {state.referrals.length === 0 && <EmptyState title="No sample documents" text="Booking a new patient visit or consultation adds a referral checklist item." />}</div>
       <div className="storage-note"><span>i</span><p>The demo stores sample document names and statuses with its demo data. It never uploads file contents.</p></div>
     </section>
-    <section className="card followup-banner-card"><div className="calendar-illustration">◷</div><div><h3>Automatic follow-up, without the chasing</h3><p>The demo schedules one sample follow-up 48 hours after booking when a referral is missing. Mark the sample document received to cancel it. No text is sent.</p></div><StatusPill tone="blue">Planned</StatusPill></section>
+    <section className="card followup-banner-card"><div className="calendar-illustration">◷</div><div><h3>Automatic follow-up, without the chasing</h3><p>New patient visits and consultations get one sample follow-up 48 hours after booking while the referral is missing, inside quiet hours and only if the visit hasn't happened yet. Marking the sample received cancels it. No text is sent.</p></div><StatusPill tone="blue">Planned</StatusPill></section>
   </div>;
 }
 
-function FollowUps({ tasks, clinicTimezone, onUpdate }: { tasks: FollowUpTask[]; clinicTimezone: string; onUpdate: (id: string, status: FollowUpTask["status"]) => void }) {
+function FollowUps({ tasks, clinicTimezone, busy, onUpdate }: { tasks: FollowUpTask[]; clinicTimezone: string; busy: boolean; onUpdate: (id: string, status: FollowUpTask["status"]) => void }) {
   const sorted = [...tasks].sort((a, b) => (a.status === "Done" ? 1 : 0) - (b.status === "Done" ? 1 : 0) || a.dueAt.localeCompare(b.dueAt));
-  return <section className="card full-card"><div className="card-heading"><div><h2>Staff follow-up queue</h2><p>Requests that need a person to close the loop.</p></div><StatusPill tone="amber">{`${tasks.filter((task) => task.status !== "Done").length} open`}</StatusPill></div>
-    <div className="task-list">{sorted.map((task) => <div className={`task-row ${task.status === "Done" ? "task-complete" : ""}`} key={task.id}><span className={`task-priority priority-${taskTone(task.priority)}`}>{task.priority === "Urgent" ? "!" : "◷"}</span><div className="task-body"><div className="task-title-line"><strong>{task.title}</strong><StatusPill tone={task.status === "Done" ? "green" : taskTone(task.priority)}>{task.status === "Done" ? "Done" : task.priority}</StatusPill></div><span>{task.patient} · {task.detail}</span></div><div className="task-due">Due <strong>{formatDateTime(task.dueAt, clinicTimezone)}</strong></div><select aria-label={`Update ${task.title}`} value={task.status} onChange={(event) => onUpdate(task.id, event.target.value as FollowUpTask["status"])}><option>Open</option><option>In progress</option><option>Done</option></select></div>)}</div>
+  return <section className="card full-card"><div className="card-heading"><div><h2>Staff follow-up queue</h2><p>Requests that need a person to close the loop. Caller wording is never stored.</p></div><StatusPill tone="amber">{`${tasks.filter((task) => task.status !== "Done").length} open`}</StatusPill></div>
+    <div className="task-list">{sorted.map((task) => <div className={`task-row ${task.status === "Done" ? "task-complete" : ""}`} key={task.id}><span className={`task-priority priority-${taskTone(task.priority)}`}>{task.priority === "Urgent" ? "!" : "◷"}</span><div className="task-body"><div className="task-title-line"><strong>{task.title}</strong><StatusPill tone={task.status === "Done" ? "green" : taskTone(task.priority)}>{task.status === "Done" ? "Done" : task.priority}</StatusPill></div><span>{task.patient}{task.appointmentReference ? ` · ${task.appointmentReference}` : ""} · {task.detail}</span></div><div className="task-due">Due <strong>{formatDateTime(task.dueAt, clinicTimezone)}</strong></div><select aria-label={`Update ${task.title}`} value={task.status} disabled={busy} onChange={(event) => onUpdate(task.id, event.target.value as FollowUpTask["status"])}><option>Open</option><option>In progress</option><option>Done</option></select></div>)}
+      {tasks.length === 0 && <EmptyState title="No follow-ups" text="Simulate a call to add a staff request." />}</div>
   </section>;
 }
 
-function Messages({ state, clinicTimezone }: { state: DemoState; clinicTimezone: string }) {
-  return <div className="stack-layout"><div className="banner banner-demo"><span className="banner-icon">◌</span><div><strong>SMS simulation only</strong><span>These are sample messages saved with demo data. The app does not send real texts.</span></div><StatusPill tone="blue">Live texting off</StatusPill></div>
-    <section className="card full-card"><div className="card-heading"><div><h2>Message activity</h2><p>Booking confirmations, reminders, follow-ups, and opt-outs.</p></div><span className="subtle-label">{state.messages.length} examples</span></div>
-      <div className="message-list">{state.messages.map((message) => <article className="message-row" key={message.id}><div className="message-leading"><span className={`message-icon ${message.status === "Opt-out" || message.status === "Cancelled (demo)" ? "message-muted" : ""}`}>{message.status === "Opt-out" || message.status === "Cancelled (demo)" ? "⊘" : "↗"}</span></div><div className="message-content"><div className="message-title"><strong>{message.purpose}</strong><span>{message.recipient}</span></div><p>{message.body}</p><small>{message.scheduledFor ? `Scheduled for ${formatDateTime(message.scheduledFor, clinicTimezone)}` : formatDateTime(message.sentAt, clinicTimezone)} · {message.status}</small></div><StatusPill tone={message.status === "Delivered (demo)" ? "green" : message.status === "Opt-out" || message.status === "Cancelled (demo)" ? "neutral" : "amber"}>{message.status}</StatusPill></article>)}</div>
+function messageTone(status: string): "green" | "neutral" | "amber" | "red" {
+  if (status === "Delivered (demo)") return "green";
+  if (status === "Suppressed (opt-out)") return "red";
+  if (status === "Opt-out" || status === "Cancelled (demo)") return "neutral";
+  return "amber";
+}
+
+function Messages({ state, clinicTimezone, busy, onPreference }: { state: DemoState; clinicTimezone: string; busy: boolean; onPreference: (patient: string, optedOut: boolean) => void }) {
+  return <div className="stack-layout"><div className="banner banner-demo"><span className="banner-icon">◌</span><div><strong>SMS simulation only</strong><span>These are sample messages saved with demo data. The app does not send real texts. Simulated texts wait for 9 AM–8 PM clinic time.</span></div><StatusPill tone="blue">Live texting off</StatusPill></div>
+    <section className="card full-card"><div className="card-heading"><div><h2>Text preferences</h2><p>Simulate a patient replying STOP or START. Opted-out patients get no reminders.</p></div></div>
+      <div className="preference-list">{demoPatients.map((patient) => {
+        const optedOut = isOptedOut(state, patient);
+        return <div className="preference-row" key={patient}><Avatar name={patient} size="small" /><strong>{patient}</strong><StatusPill tone={optedOut ? "red" : "green"}>{optedOut ? "Opted out" : "Texts allowed"}</StatusPill><button className="row-text-action" disabled={busy} onClick={() => onPreference(patient, !optedOut)}>{optedOut ? "Simulate START" : "Simulate STOP"}</button></div>;
+      })}</div>
+    </section>
+    <section className="card full-card"><div className="card-heading"><div><h2>Message activity</h2><p>Booking confirmations, reminders, follow-ups, and opt-outs.</p></div><span className="subtle-label">{state.messages.length} records</span></div>
+      <div className="message-list">{state.messages.map((message) => {
+        const muted = message.status === "Opt-out" || message.status === "Cancelled (demo)" || message.status === "Suppressed (opt-out)";
+        return <article className="message-row" key={message.id}><div className="message-leading"><span className={`message-icon ${muted ? "message-muted" : ""}`}>{muted ? "⊘" : "↗"}</span></div><div className="message-content"><div className="message-title"><strong>{message.purpose}</strong><span>{message.recipient}</span></div><p>{message.body}</p><small>{message.scheduledFor ? `${message.status === "Delivered (demo)" ? "Due" : "Scheduled for"} ${formatDateTime(message.scheduledFor, clinicTimezone)}` : `Created ${formatDateTime(message.sentAt, clinicTimezone)}`} · {message.status}</small></div><StatusPill tone={messageTone(message.status)}>{message.status}</StatusPill></article>;
+      })}{state.messages.length === 0 && <EmptyState title="No messages" text="Booking a sample appointment creates simulated texts." />}</div>
     </section></div>;
 }
 
-function Faqs({ entries, search, onSearch, onAskStaff }: { entries: typeof faqEntries; search: string; onSearch: (value: string) => void; onAskStaff: (question: string) => void }) {
+function Faqs({ search, onSearch, busy, onAskStaff, onCreateTask }: { search: string; onSearch: (value: string) => void; busy: boolean; onAskStaff: () => void; onCreateTask: (requestType: RequestType) => void }) {
   const categories = [...new Set(faqEntries.map((entry) => entry.category))];
   const [category, setCategory] = useState("All topics");
-  const visible = entries.filter((entry) => category === "All topics" || entry.category === category);
-  return <div className="stack-layout"><div className="faq-tools"><div className="search-wrap"><span>⌕</span><input aria-label="Search FAQs" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Search common questions..." /></div><select value={category} onChange={(event) => setCategory(event.target.value)}><option>All topics</option>{categories.map((item) => <option key={item}>{item}</option>)}</select><StatusPill tone="green">English · reviewed</StatusPill></div>
-    <div className="faq-grid">{visible.map((entry) => <article className="card faq-card" key={entry.id}><div className="faq-card-top"><span className="faq-category">{entry.category}</span><span className="faq-status">✓ Approved</span></div><h3>{entry.question}</h3><p>{entry.answer}</p><div className="faq-card-footer"><span>{entry.updated}</span><button onClick={() => onAskStaff(`Please review this answer: ${entry.question}`)}>Ask staff to review ↗</button></div></article>)}{visible.length === 0 && <EmptyState title="No matching questions" text="Try another search term." />}</div>
-    <div className="banner banner-safety"><span className="banner-icon">◇</span><div><strong>Answers stay in their lane</strong><span>Medical, symptom, and medication questions are handed to clinic staff. The assistant does not guess when an approved answer is missing.</span></div></div>
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState<FaqSearchResult | null>(null);
+  const needle = search.toLowerCase();
+  const visible = faqEntries.filter((entry) => (category === "All topics" || entry.category === category) && `${entry.question} ${entry.answer} ${entry.category}`.toLowerCase().includes(needle));
+  return <div className="stack-layout">
+    <section className="card full-card faq-tester"><div className="card-heading"><div><h2>Test a caller question</h2><p>Runs the same approved-answer lookup the voice assistant uses. Nothing you type is saved.</p></div><StatusPill tone="blue">Same rules as voice</StatusPill></div>
+      <form className="faq-tester-form" onSubmit={(event: FormEvent) => { event.preventDefault(); if (question.trim()) setAnswer(searchApprovedFaq(question)); }}>
+        <div className="search-wrap"><span>?</span><input aria-label="Caller question" value={question} maxLength={200} onChange={(event) => { setQuestion(event.target.value); setAnswer(null); }} placeholder="For example: Is there parking? or Can you refill my prescription?" /></div>
+        <button className="button button-primary button-small" type="submit" disabled={!question.trim()}>Check answer</button>
+      </form>
+      {answer && <div className={`faq-result ${answer.emergency ? "faq-result-alert" : answer.handoff ? "faq-result-handoff" : ""}`} role="status">
+        <StatusPill tone={answer.emergency ? "red" : answer.approved && !answer.handoff ? "green" : "amber"}>{answer.emergency ? "Emergency message" : !answer.approved ? "No approved answer" : answer.handoff ? "Approved answer + staff hand-off" : "Approved answer"}</StatusPill>
+        <p>{answer.answer}</p>
+        {answer.suggestedRequest && answer.suggestedRequest !== "faq_review" && <button className="text-button" disabled={busy} onClick={() => onCreateTask(answer.suggestedRequest!)}>Create “{requestTemplates[answer.suggestedRequest].title}” task <span>→</span></button>}
+      </div>}
+    </section>
+    <div className="faq-tools"><div className="search-wrap"><span>⌕</span><input aria-label="Search FAQs" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Search common questions..." /></div><select aria-label="FAQ topic" value={category} onChange={(event) => setCategory(event.target.value)}><option>All topics</option>{categories.map((item) => <option key={item}>{item}</option>)}</select><StatusPill tone="green">English · reviewed</StatusPill></div>
+    <div className="faq-grid">{visible.map((entry) => <article className="card faq-card" key={entry.id}><div className="faq-card-top"><span className="faq-category">{entry.category}</span><span className="faq-status">✓ Approved</span></div><h3>{entry.question}</h3><p>{entry.answer}</p><div className="faq-card-footer"><span>{entry.updated}</span><button disabled={busy} onClick={onAskStaff}>Ask staff to review ↗</button></div></article>)}{visible.length === 0 && <EmptyState title="No matching questions" text="Try another search term." />}</div>
+    <div className="banner banner-safety"><span className="banner-icon">◇</span><div><strong>Answers stay in their lane</strong><span>Medical, symptom, and medication questions are handed to clinic staff. Refill requests are routed to staff without advice. The assistant does not guess when an approved answer is missing.</span></div></div>
   </div>;
 }
 
-function Settings({ market, clinicTimezone, displayTimezone, onReset }: { market: Market; clinicTimezone: string; displayTimezone: string; onReset: () => void }) {
-  return <div className="settings-grid"><section className="card settings-card"><div className="card-heading"><div><h2>Clinic profile</h2><p>Fictional settings for this demo.</p></div><StatusPill tone="blue">Demo only</StatusPill></div><div className="setting-line"><span>Market</span><strong>{market}</strong></div><div className="setting-line"><span>Clinic scheduling timezone</span><strong>{timezoneLabel(clinicTimezone)}</strong></div><div className="setting-line"><span>My display timezone</span><strong>{timezoneLabel(displayTimezone)}</strong></div><div className="setting-line"><span>Language</span><strong>English</strong></div><div className="setting-line"><span>Opening hours</span><strong>Mon–Fri · 8 AM–5 PM</strong></div><div className="setting-line"><span>Reminder plan</span><strong>Confirmation · 24h · docs follow-up</strong></div></section>
-      <section className="card settings-card"><div className="card-heading"><div><h2>Phone & messaging</h2><p>No live voice or messaging connection is enabled for this demo.</p></div><span className="mock-tag">MOCK</span></div><div className="integration-item"><span className="integration-logo retell-logo">R</span><div><strong>Voice assistant</strong><small>Retell · test numbers only when enabled</small></div><StatusPill tone="blue">Not connected</StatusPill></div><div className="integration-item"><span className="integration-logo sms-logo">↗</span><div><strong>SMS reminders</strong><small>Provider chosen after first market pilot</small></div><StatusPill tone="blue">Not connected</StatusPill></div><div className="allowlist-box"><span>◉</span><div><strong>Test number allowlist</strong><small>No live numbers configured. Real calls and texts remain blocked.</small></div></div></section>
-      <section className="card settings-card privacy-card"><div className="privacy-icon">◇</div><div><h2>Keep the demo safe</h2><p>Use fictional names and sample data only. Do not enter real health details or upload patient records. Clinical requests go to a person.</p><button className="text-button" onClick={() => window.alert("This is a fictional front desk demo. It does not provide medical care and does not send calls or texts.")}>View demo boundaries <span>→</span></button></div></section>
-      <section className="card settings-card reset-card"><div><h2>Reset this demo</h2><p>Restore the original fictional data. In cloud mode, this affects all visitors using the shared demo.</p></div><button className="button button-secondary" onClick={onReset}>Reset sample data</button></section>
+function Settings({ market, clinicTimezone, displayTimezone, connection, busy, onReset }: { market: Market; clinicTimezone: string; displayTimezone: string; connection: Connection; busy: boolean; onReset: () => void }) {
+  const [showBoundaries, setShowBoundaries] = useState(false);
+  return <div className="settings-grid"><section className="card settings-card"><div className="card-heading"><div><h2>Clinic profile</h2><p>Fictional settings for this demo.</p></div><StatusPill tone="blue">Demo only</StatusPill></div><div className="setting-line"><span>Market</span><strong>{market}</strong></div><div className="setting-line"><span>Clinic scheduling timezone</span><strong>{timezoneLabel(clinicTimezone)}</strong></div><div className="setting-line"><span>My display timezone</span><strong>{timezoneLabel(displayTimezone)}</strong></div><div className="setting-line"><span>Language</span><strong>English</strong></div><div className="setting-line"><span>Opening hours</span><strong>Mon–Fri · 8 AM–5 PM</strong></div><div className="setting-line"><span>Reminder plan</span><strong>Confirmation · 24h · 48h docs follow-up</strong></div><div className="setting-line"><span>Text quiet hours</span><strong>Outside 9 AM–8 PM clinic time</strong></div><div className="setting-line"><span>Data</span><strong>{connection === "cloud" ? "Shared cloud demo" : "This browser only"}</strong></div></section>
+      <section className="card settings-card"><div className="card-heading"><div><h2>Phone & messaging</h2><p>No live voice or messaging connection is enabled for this demo.</p></div><span className="mock-tag">MOCK</span></div><div className="integration-item"><span className="integration-logo retell-logo">R</span><div><strong>Voice assistant</strong><small>Retell draft agent · test numbers only when enabled</small></div><StatusPill tone="blue">Not connected</StatusPill></div><div className="integration-item"><span className="integration-logo sms-logo">↗</span><div><strong>SMS reminders</strong><small>Provider chosen after the first market pilot</small></div><StatusPill tone="blue">Not connected</StatusPill></div><div className="allowlist-box"><span>◉</span><div><strong>Test number allowlist</strong><small>No live numbers configured. Real calls and texts remain blocked.</small></div></div></section>
+      <section className="card settings-card privacy-card"><div className="privacy-icon">◇</div><div><h2>Keep the demo safe</h2><p>Use fictional names and sample data only. Do not enter real health details or upload patient records. Clinical requests go to a person.</p><button className="text-button" onClick={() => setShowBoundaries((value) => !value)} aria-expanded={showBoundaries}>{showBoundaries ? "Hide demo boundaries" : "View demo boundaries"} <span>→</span></button>{showBoundaries && <ul className="boundary-list"><li>This is a fictional front desk demo. It does not provide medical care, triage, or advice.</li><li>No calls or texts are sent; reminders are simulated records.</li><li>Only built-in sample names and DEMO references are accepted, and caller wording is never stored.</li><li>Not represented as HIPAA, GDPR, or UAE health-data compliant.</li></ul>}</div></section>
+      <section className="card settings-card reset-card"><div><h2>Reset this demo</h2><p>Restore the original fictional data. {connection === "cloud" ? "This affects everyone using the shared demo." : "This resets the copy in this browser."}</p></div><button className="button button-secondary" disabled={busy} onClick={onReset}>Reset sample data</button></section>
     </div>;
 }
 
-function BookingModal({ clinicTimezone, onClose, onSubmit }: { clinicTimezone: string; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="booking-title"><div className="modal-header"><div><span className="modal-kicker">SAMPLE SCHEDULE</span><h2 id="booking-title">Book an appointment</h2><p>Choose fictional details for this demo.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><form onSubmit={onSubmit}>
-    <label className="form-label">Fictional patient<select name="patient" required defaultValue=""><option value="" disabled>Choose sample patient</option>{demoPatients.map((patient) => <option key={patient}>{patient}</option>)}</select></label>
-    <label className="form-label">Appointment type<select name="appointmentType">{appointmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
-    <label className="form-label">Date and time <input type="datetime-local" name="startAt" required defaultValue={defaultLocalDateTime(clinicTimezone)} /></label>
-    <div className="timezone-hint"><span>◷</span> Using clinic time: <strong>{timezoneLabel(clinicTimezone)}</strong></div>
-    <div className="modal-disclaimer">This adds a sample appointment and a simulated confirmation. No real text is sent.</div>
-    <div className="modal-actions"><button type="button" className="button button-secondary" onClick={onClose}>Back</button><button type="submit" className="button button-primary">Confirm sample booking <span>→</span></button></div>
-  </form></section></div>;
+function Modal({ labelledBy, onClose, children, wide = false }: { labelledBy: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`modal-card ${wide ? "call-modal" : ""}`} role="dialog" aria-modal="true" aria-labelledby={labelledBy}>{children}</section></div>;
 }
 
-function WaitlistModal({ clinicTimezone, onClose, onSubmit }: { clinicTimezone: string; onClose: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="waitlist-title"><div className="modal-header"><div><span className="modal-kicker">SAMPLE WAITLIST</span><h2 id="waitlist-title">Add a waitlist request</h2><p>Use a fictional patient and preferred date.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><form onSubmit={onSubmit}>
+interface SlotSubmission { patient: string; appointmentType: string; slot: AvailabilitySlot; key: string }
+
+function SlotModal({ mode, appointment, backend, clinicTimezone, onClose, onSubmit }: {
+  mode: "book" | "move"; appointment?: Appointment; backend: DemoBackend; clinicTimezone: string;
+  onClose: () => void; onSubmit: (submission: SlotSubmission) => Promise<boolean>;
+}) {
+  const [patient, setPatient] = useState(appointment?.patient ?? "");
+  const [appointmentType, setAppointmentType] = useState<string>(appointment?.type ?? appointmentTypes[0]);
+  const [date, setDate] = useState(() => nextOpenDateKey(clinicTimezone));
+  const [slots, setSlots] = useState<AvailabilitySlot[] | null>(null);
+  const [selected, setSelected] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [reload, setReload] = useState(0);
+  // One key per open dialog: pressing confirm again after a network error cannot create a second booking.
+  const key = useMemo(() => newIdempotencyKey(), []);
+
+  useEffect(() => {
+    let active = true;
+    setSlots(null); setSelected(""); setError("");
+    backend.availability({ date, appointmentType, timezone: clinicTimezone, ignoreAppointmentId: appointment?.id })
+      .then((result) => { if (active) setSlots(result); })
+      .catch((reason) => { if (active) { setSlots([]); setError(reason instanceof ApiRequestError ? reason.message : "Availability could not be loaded."); } });
+    return () => { active = false; };
+  }, [backend, date, appointmentType, clinicTimezone, appointment?.id, reload]);
+
+  const slot = slots?.find((item) => item.startAt === selected);
+  const title = mode === "book" ? "Book an appointment" : `Move ${appointment?.reference}`;
+  return <Modal labelledBy="slot-title" onClose={onClose}>
+    <div className="modal-header"><div><span className="modal-kicker">{mode === "book" ? "SAMPLE SCHEDULE" : "RESCHEDULE"}</span><h2 id="slot-title">{title}</h2><p>{mode === "book" ? "Pick a fictional patient and an open sample time." : `${appointment?.patient} · ${appointment?.type}. Currently ${appointment ? formatDateTime(appointment.startAt, clinicTimezone) : ""}.`}</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div>
+    <form onSubmit={async (event) => {
+      event.preventDefault();
+      if (!slot || !patient) return;
+      setSubmitting(true);
+      const ok = await onSubmit({ patient, appointmentType, slot, key });
+      setSubmitting(false);
+      if (!ok) setReload((value) => value + 1);
+    }}>
+      {mode === "book" && <>
+        <label className="form-label">Fictional patient<select name="patient" required value={patient} onChange={(event) => setPatient(event.target.value)}><option value="" disabled>Choose sample patient</option>{demoPatients.map((name) => <option key={name}>{name}</option>)}</select></label>
+        <label className="form-label">Appointment type<select name="appointmentType" value={appointmentType} onChange={(event) => setAppointmentType(event.target.value)}>{appointmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
+      </>}
+      <label className="form-label">Date (clinic time)<input type="date" name="date" required min={todayKey(clinicTimezone)} value={date} onChange={(event) => { if (event.target.value) setDate(event.target.value); }} /></label>
+      <fieldset className="slot-fieldset"><legend className="form-label">Open sample times</legend>
+        {slots === null && <p className="slot-note">Checking availability…</p>}
+        {slots && slots.length === 0 && <p className="slot-note">{error || "No open sample times on this date. The clinic is open Monday to Friday, 8 AM to 5 PM. Try another date or the waitlist."}</p>}
+        {slots && slots.length > 0 && <div className="slot-grid">{slots.map((item) => <button type="button" key={item.startAt} className={`slot-option ${selected === item.startAt ? "slot-selected" : ""}`} aria-pressed={selected === item.startAt} onClick={() => setSelected(item.startAt)}><strong>{formatTime(item.startAt, clinicTimezone)}</strong><small>{item.provider.replace("Dr. ", "Dr ")}</small></button>)}</div>}
+      </fieldset>
+      <div className="timezone-hint"><span>◷</span> Clinic time: <strong>{timezoneLabel(clinicTimezone)}</strong></div>
+      <div className="modal-disclaimer">{mode === "book" ? "This adds a sample appointment and simulated texts once the schedule confirms it. No real text is sent." : "The new time is saved only if the schedule confirms it is still free. No real text is sent."}</div>
+      <div className="modal-actions"><button type="button" className="button button-secondary" onClick={onClose}>Back</button><button type="submit" className="button button-primary" disabled={!slot || !patient || submitting}>{submitting ? "Saving…" : mode === "book" ? "Confirm sample booking" : "Move appointment"} <span>→</span></button></div>
+    </form>
+  </Modal>;
+}
+
+function WaitlistModal({ clinicTimezone, busy, onClose, onSubmit }: { clinicTimezone: string; busy: boolean; onClose: () => void; onSubmit: (action: DemoAction, key: string) => Promise<void> }) {
+  const key = useMemo(() => newIdempotencyKey(), []);
+  return <Modal labelledBy="waitlist-title" onClose={onClose}><div className="modal-header"><div><span className="modal-kicker">SAMPLE WAITLIST</span><h2 id="waitlist-title">Add a waitlist request</h2><p>Use a fictional patient and preferred date.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><form onSubmit={(event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    void onSubmit({ type: "join_waitlist", patient: String(form.get("patient") || ""), appointmentType: String(form.get("appointmentType") || ""), preferredDate: String(form.get("preferredDate") || ""), timezone: clinicTimezone }, key);
+  }}>
     <label className="form-label">Fictional patient<select name="patient" required defaultValue=""><option value="" disabled>Choose sample patient</option>{demoPatients.map((patient) => <option key={patient}>{patient}</option>)}</select></label>
     <label className="form-label">Appointment type<select name="appointmentType">{appointmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
-    <label className="form-label">Preferred date<input type="date" name="preferredDate" required min={new Date().toISOString().slice(0, 10)} defaultValue={new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)} /></label>
+    <label className="form-label">Preferred date (clinic time)<input type="date" name="preferredDate" required min={todayKey(clinicTimezone)} defaultValue={nextOpenDateKey(clinicTimezone)} /></label>
     <div className="timezone-hint"><span>◷</span> Preferred date uses clinic time: <strong>{timezoneLabel(clinicTimezone)}</strong></div>
     <div className="modal-disclaimer">This creates a sample request. A staff task is made when a matching opening appears; no text is sent.</div>
-    <div className="modal-actions"><button type="button" className="button button-secondary" onClick={onClose}>Back</button><button type="submit" className="button button-primary">Add to sample waitlist <span>→</span></button></div>
-  </form></section></div>;
+    <div className="modal-actions"><button type="button" className="button button-secondary" onClick={onClose}>Back</button><button type="submit" className="button button-primary" disabled={busy}>Add to sample waitlist <span>→</span></button></div>
+  </form></Modal>;
 }
 
 function CallDemoModal({ onClose, onSelect }: { onClose: () => void; onSelect: (intent: CallIntent) => void }) {
   const options: { id: CallIntent; icon: string; title: string; detail: string }[] = [
-    { id: "appointment", icon: "▦", title: "Book an appointment", detail: "Try a sample booking flow" },
+    { id: "appointment", icon: "▦", title: "Book an appointment", detail: "Check open times and confirm a sample booking" },
     { id: "waitlist", icon: "↗", title: "Join a waitlist", detail: "Ask staff to contact a sample patient about an opening" },
-    { id: "faq", icon: "?", title: "Ask a common question", detail: "See how approved answers work" },
+    { id: "faq", icon: "?", title: "Ask a common question", detail: "Test the approved-answer lookup" },
     { id: "callback", icon: "◉", title: "Ask for a person", detail: "Add a callback to the staff queue" },
+    { id: "accessibility", icon: "⊕", title: "Request an interpreter or access help", detail: "Add an accessibility request for staff" },
     { id: "documents", icon: "▤", title: "Ask about a referral", detail: "Create a document follow-up task" },
     { id: "refill", icon: "＋", title: "Request a prescription refill", detail: "Route it to staff without advice" },
     { id: "records", icon: "▧", title: "Request medical records", detail: "Create an administrative task" },
     { id: "billing", icon: "$", title: "Ask a billing question", detail: "Route the question to staff" },
   ];
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal-card call-modal" role="dialog" aria-modal="true" aria-labelledby="call-title"><div className="modal-header"><div><span className="modal-kicker">INTERACTIVE WALKTHROUGH · MOCK MODE</span><h2 id="call-title">What would you like to try?</h2><p>Choose a sample caller request. It updates demo data and makes no call or text.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><div className="call-options">{options.map((option) => <button className="call-option" key={option.id} onClick={() => onSelect(option.id)}><span className="call-option-icon">{option.icon}</span><span><strong>{option.title}</strong><small>{option.detail}</small></span><span className="call-option-arrow">→</span></button>)}</div><div className="modal-disclaimer">The live voice and SMS providers are not connected. This walkthrough uses fictional data only.</div></section></div>;
+  return <Modal labelledBy="call-title" onClose={onClose} wide><div className="modal-header"><div><span className="modal-kicker">INTERACTIVE WALKTHROUGH · MOCK MODE</span><h2 id="call-title">What would you like to try?</h2><p>Choose a sample caller request. It updates demo data and makes no call or text.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><div className="call-options">{options.map((option) => <button className="call-option" key={option.id} onClick={() => onSelect(option.id)}><span className="call-option-icon">{option.icon}</span><span><strong>{option.title}</strong><small>{option.detail}</small></span><span className="call-option-arrow">→</span></button>)}</div><div className="modal-disclaimer">The live voice and SMS providers are not connected. This walkthrough uses fictional data only.</div></Modal>;
 }
 
 function EmptyState({ title, text }: { title: string; text: string }) {

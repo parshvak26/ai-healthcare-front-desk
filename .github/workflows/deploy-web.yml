@@ -35,6 +35,11 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Type-check and run tests
+        run: |
+          npm run typecheck
+          npm test
+
       - name: Set GitHub Pages path
         run: |
           repository_name="${GITHUB_REPOSITORY#*/}"

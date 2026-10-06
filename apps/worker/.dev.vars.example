@@ -2,3 +2,5 @@ SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SECRET_KEY=
 RETELL_API_KEY=
 RETELL_TEST_NUMBERS=
+# Optional. Defaults to America/Chicago for voice requests that do not name a timezone.
+CLINIC_TIMEZONE=

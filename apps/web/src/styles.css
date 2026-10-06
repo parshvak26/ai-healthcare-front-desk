@@ -71,7 +71,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .avatar-small { width: 29px; height: 29px; font-size: 8px; }
 .page-content { max-width: 1430px; margin: 0 auto; padding: 32px 39px 18px; }
 .page-heading-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
-.eyebrow { display: flex; align-items: center; gap: 7px; color: #97a3af; font-size: 9px; font-weight: 700; letter-spacing: .9px; }
+.eyebrow { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 7px; color: #97a3af; font-size: 9px; font-weight: 700; letter-spacing: .9px; }
 .eyebrow span { color: #c2cbd2; }
 h1, h2, h3, p { margin-top: 0; }
 h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; letter-spacing: -.7px; }
@@ -340,7 +340,8 @@ h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; 
   .overview-grid .card, .lower-grid .card { min-height: 0; }
   .appointment-table-head { display: none; }
   .appointment-table-row { grid-template-columns: 1fr 1.2fr .85fr .8fr; }
-  .appointment-table-row .provider-cell, .appointment-table-row .row-actions { display: none; }
+  .appointment-table-row .provider-cell { display: none; }
+  .appointment-table-row .row-actions { grid-column: 1 / -1; justify-content: flex-end; flex-wrap: wrap; }
   .appointment-table-row .pill { justify-self: end; }
   .timezone-strip { flex-wrap: wrap; }
   .english-tag { margin-left: 0; }
@@ -423,4 +424,45 @@ h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; 
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
+/* Server-confirmed actions, availability picker, and connection state */
+.demo-indicator-warning { color: #b77c2f; }
+.demo-indicator-warning .online-dot { background: #e0a54b; box-shadow: 0 0 0 3px #fff4e1; }
+.connection-banner { margin-bottom: 16px; }
+.banner-button { width: 100%; margin-bottom: 16px; border-style: solid; text-align: left; cursor: pointer; font: inherit; }
+.banner-button:hover { border-color: #c9d9e8; }
+.loading-card { padding: 30px 0; }
+.toast-error { border-color: #f1cdca; color: #a5504a; }
+.toast-error > span { background: #fff0ef; color: #c5665e; }
+.row-actions button:disabled, .row-text-action:disabled, .check-button:disabled, .faq-card-footer button:disabled { opacity: .5; cursor: not-allowed; }
+.search-compact { flex: 0 1 190px; min-height: 30px; }
+.history-list { padding-bottom: 12px; }
+.preference-list { padding: 0 18px 10px; }
+.preference-row { min-height: 52px; display: grid; grid-template-columns: 28px minmax(110px, 1fr) auto auto; align-items: center; gap: 12px; border-top: 1px solid #eff1f4; color: #435568; font-size: 10px; }
+.faq-tester { padding-bottom: 14px; }
+.faq-tester-form { display: flex; align-items: center; gap: 10px; padding: 0 18px; }
+.faq-result { display: flex; flex-direction: column; gap: 8px; margin: 12px 18px 0; padding: 12px; border: 1px solid #dcefe8; border-radius: 8px; background: #f6fbf9; }
+.faq-result p { margin: 0; color: #4d5f70; font-size: 10px; line-height: 1.5; }
+.faq-result .text-button { align-self: flex-start; padding-left: 0; }
+.faq-result-handoff { border-color: #f3e2c4; background: #fffaf2; }
+.faq-result-alert { border-color: #f1cdca; background: #fff6f5; }
+.boundary-list { margin: 10px 0 0; padding-left: 16px; color: #6f7d8b; font-size: 9px; line-height: 1.6; }
+.slot-fieldset { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 6px; }
+.slot-fieldset legend { margin-bottom: 6px; }
+.slot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 6px; max-height: 196px; overflow: auto; padding: 1px; }
+.slot-option { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 7px 4px; border: 1px solid #e3e9ee; border-radius: 7px; background: #fff; color: #435568; }
+.slot-option strong { font-size: 10px; }
+.slot-option small { color: #8d9aa6; font-size: 8px; }
+.slot-option:hover { border-color: #bddbd3; }
+.slot-selected { border-color: #0b8a83; background: #e9f6f3; box-shadow: inset 0 0 0 1px #0b8a83; }
+.slot-note { margin: 0; color: #8d9aa6; font-size: 9px; line-height: 1.5; }
+@media (max-width: 720px) {
+  .faq-tester-form { flex-direction: column; align-items: stretch; padding: 0 12px; }
+  .faq-result { margin: 12px 12px 0; }
+  .preference-list { padding: 0 12px 10px; }
+  .preference-row { grid-template-columns: 27px 1fr auto; padding: 10px 0; }
+  .preference-row .row-text-action { grid-column: 2 / -1; justify-self: end; }
+  .search-compact { flex-basis: 100%; }
+  .inline-actions { flex-wrap: wrap; }
 }
