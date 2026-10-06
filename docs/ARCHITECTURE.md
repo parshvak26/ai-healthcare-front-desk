@@ -238,10 +238,11 @@ Implemented routes in the current Worker (API version 2, reported by `/api/healt
 - `POST /api/demo/actions` — `{ idempotencyKey, action }`, where `action.type` is one of `book_appointment`, `reschedule_appointment`, `cancel_appointment`, `confirm_appointment`, `record_attendance`, `join_waitlist`, `cancel_waitlist`, `mark_document_received`, `create_task`, `update_task`, `set_sms_preference`, or `reset_demo`. Returns the saved snapshot and a result message. Unknown fields are rejected.
 - `POST /api/appointments/availability` — open slots for a date, appointment type, and clinic timezone.
 - `GET /api/faqs` — the approved FAQ list.
+- `POST /api/demo-call` — `{ phoneNumber, consent: true, turnstileToken }`. Validates a US or Indian (+91) number, consent, and Turnstile; reserves the call against the limits in Supabase (salted hashes only); then calls Retell `create-phone-call` from the shared demo number with the Healthcare agent as a one-time override, a 5-minute cap, and `metadata.source = "healthcare-web-demo"`.
 - `POST /webhooks/retell/custom-function` — signed Retell tools: `get_availability`, `create_appointment`, `lookup_appointment`, `confirm_appointment`, `reschedule_appointment`, `cancel_appointment`, `join_waitlist`, `search_approved_faq`, `request_staff_followup`, `check_document_status`.
 - `POST /webhooks/retell/events` — signed call events; stores only the opaque call ID and event name.
 
-Retell shows the agent only the HTTP status of a non-2xx response, so business outcomes (slot taken, booking not found) are returned as HTTP 200 with `success: false` and a message the agent can act on. Signature and allowlist failures stay 401/403.
+Tools act only for calls the Worker itself started (signed request, Healthcare agent ID, and the `healthcare-web-demo` metadata marker, which only API-key holders can set) or for inbound calls from allowlisted test numbers. Retell shows the agent only the HTTP status of a non-2xx response, so business outcomes (slot taken, booking not found) are returned as HTTP 200 with `success: false` and a message the agent can act on. Signature and allowlist failures stay 401/403.
 
 File upload, SMS-provider webhooks, user authentication, and real clinic administration are not implemented. The demo waitlist is synthetic and only creates a staff follow-up when a matching appointment is cancelled or moved.
 

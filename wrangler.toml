@@ -12,6 +12,17 @@ CLINIC_ID = "harbor-health-demo"
 PUBLIC_ORIGINS = "https://parshvak26.github.io,http://localhost:5173"
 SMS_MODE = "mock"
 SUPABASE_URL = "https://tboxzutkvypdowophees.supabase.co"
+# Public "Call me" demo calls (see apps/worker/src/calls.ts). Set DEMO_CALLS to "off" to stop new calls at once.
+# They also need the TURNSTILE_SECRET_KEY and RETELL_API_KEY secrets; RETELL_TEST_NUMBERS (secret) lists the
+# owner's numbers, which skip the daily limits.
+DEMO_CALLS = "on"
+RETELL_FROM_NUMBER = "+15128231502"
+RETELL_AGENT_ID = "agent_bcd0e610f4535270f5642efeb0"
+TURNSTILE_HOSTNAME = "parshvak26.github.io"
+MAX_CALLS_PER_DAY = "10"
+MAX_CALLS_PER_IP_PER_DAY = "3"
+PHONE_COOLDOWN_MINUTES = "30"
+MAX_CALL_DURATION_SECONDS = "300"
 
 [triggers]
 crons = ["*/15 * * * *"]

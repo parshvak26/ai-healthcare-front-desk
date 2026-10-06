@@ -12,6 +12,16 @@ export interface Env {
   RETELL_API_KEY?: string;
   RETELL_TEST_NUMBERS?: string;
   SMS_MODE?: string;
+  /** "on" enables the public "Call me" button; anything else keeps outbound calls off. */
+  DEMO_CALLS?: string;
+  RETELL_FROM_NUMBER?: string;
+  RETELL_AGENT_ID?: string;
+  TURNSTILE_SECRET_KEY?: string;
+  TURNSTILE_HOSTNAME?: string;
+  MAX_CALLS_PER_DAY?: string;
+  MAX_CALLS_PER_IP_PER_DAY?: string;
+  PHONE_COOLDOWN_MINUTES?: string;
+  MAX_CALL_DURATION_SECONDS?: string;
 }
 
 const defaultClinicId = "harbor-health-demo";
@@ -29,7 +39,7 @@ const notConfigured = () => new DomainError(503, "backend_not_configured", "The 
 const databaseError = () => new DomainError(502, "database_error", "The demo database could not complete that request.");
 const unreadable = () => new DomainError(502, "demo_seed_failed", "The sample schedule could not be loaded.");
 
-async function rpc(env: Env, name: string, body: unknown) {
+export async function rpc(env: Env, name: string, body: unknown) {
   if (!configured(env)) throw notConfigured();
   const url = new URL(`/rest/v1/rpc/${name}`, env.SUPABASE_URL);
   const headers = new Headers({ "Content-Type": "application/json", apikey: env.SUPABASE_SECRET_KEY });

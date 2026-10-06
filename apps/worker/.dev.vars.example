@@ -4,3 +4,5 @@ RETELL_API_KEY=
 RETELL_TEST_NUMBERS=
 # Optional. Defaults to America/Chicago for voice requests that do not name a timezone.
 CLINIC_TIMEZONE=
+# Required for the "Call me" button (Cloudflare Turnstile secret for the parshvak26.github.io widget).
+TURNSTILE_SECRET_KEY=

@@ -466,3 +466,25 @@ h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; 
   .search-compact { flex-basis: 100%; }
   .inline-actions { flex-wrap: wrap; }
 }
+
+/* "Call me" real demo call */
+.call-me-card { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 14px; padding: 14px; border: 1px solid #d5e9e1; border-radius: 10px; background: #f6fbf9; }
+.call-me-card form { display: flex; flex-direction: column; gap: 9px; }
+.call-me-heading { display: flex; align-items: center; gap: 10px; }
+.call-me-heading > div { display: flex; flex-direction: column; gap: 3px; }
+.call-me-heading strong { color: #24384a; font-size: 11px; }
+.call-me-heading small { color: #758493; font-size: 9px; line-height: 1.4; }
+.call-me-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 9px; background: #0b8a83; color: #fff; font-size: 15px; }
+.call-me-ringing { animation: call-pulse 1.4s ease-in-out infinite; }
+@keyframes call-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(11, 138, 131, .35); } 50% { box-shadow: 0 0 0 7px rgba(11, 138, 131, 0); } }
+.call-me-hint { margin-top: -4px; color: #8d9aa6; font-size: 8px; }
+.call-me-consent { display: flex; align-items: flex-start; gap: 8px; color: #5d6e7f; font-size: 9px; line-height: 1.45; }
+.call-me-consent input { margin-top: 2px; }
+.call-me-error { padding: 8px 10px; border: 1px solid #f1cdca; border-radius: 7px; background: #fff6f5; color: #a5504a; font-size: 9px; line-height: 1.4; }
+.call-me-tips { margin: 0; padding-left: 16px; color: #5d6e7f; font-size: 9px; line-height: 1.6; }
+.call-me-success .text-button { align-self: flex-start; padding-left: 0; }
+.call-me-off { background: #f8fafb; border-color: #e6edf0; }
+.call-me-off .call-me-icon { background: #c4d2d8; }
+.turnstile-box { min-height: 65px; }
+.call-section-label { margin: 0 0 8px; color: #8d9aa6; font-size: 8px; font-weight: 800; letter-spacing: .9px; text-transform: uppercase; }
+@media (prefers-reduced-motion: reduce) { .call-me-ringing { animation: none; } }

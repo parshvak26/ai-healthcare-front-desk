@@ -219,6 +219,18 @@ describe("Retell custom functions", () => {
     assert.match(clinical.body.answer, /cannot answer medical questions/);
   });
 
+  it("trusts outbound demo calls this Worker started, and nothing else from other numbers", async () => {
+    const agentEnv = { ...env, RETELL_AGENT_ID: "agent_bcd0e610f4535270f5642efeb0" };
+    const send = async (callFields: Record<string, unknown>) => {
+      const raw = JSON.stringify({ name: "search_approved_faq", args: { question: "Is there parking?" }, call: { call_id: "call_out", from_number: "+15128231502", to_number: "+919876543210", ...callFields } });
+      return (await fetchHandler(new Request("https://worker.example/webhooks/retell/custom-function", { method: "POST", headers: { "X-Retell-Signature": await sign(raw) }, body: raw }), agentEnv)).status;
+    };
+    assert.equal(await send({ direction: "outbound", agent_id: "agent_bcd0e610f4535270f5642efeb0", metadata: { source: "healthcare-web-demo" } }), 200);
+    assert.equal(await send({ direction: "outbound", agent_id: "agent_bcd0e610f4535270f5642efeb0" }), 403, "no marker");
+    assert.equal(await send({ direction: "outbound", agent_id: "agent_other", metadata: { source: "healthcare-web-demo" } }), 403, "another agent (for example HVAC)");
+    assert.equal(await send({ direction: "inbound", agent_id: "agent_bcd0e610f4535270f5642efeb0", metadata: { source: "healthcare-web-demo" } }), 403, "inbound from a stranger");
+  });
+
   it("records only opaque call events", async () => {
     const raw = JSON.stringify({ event: "call_ended", call: { call_id: "call_evt", from_number: TEST_NUMBER, transcript: "secret words" } });
     const response = await call("/webhooks/retell/events", { method: "POST", headers: { "X-Retell-Signature": await sign(raw) }, body: raw });

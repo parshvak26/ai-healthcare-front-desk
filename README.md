@@ -13,9 +13,10 @@ A low-cost portfolio demo for an AI healthcare front desk. It focuses on adminis
 - The FAQ page includes a "test a caller question" box that runs the same approved-answer lookup as the voice tool: refill requests go to staff, medical and medication questions get the approved safety answer, emergencies get the local-emergency message, and unknown questions are never answered from general knowledge.
 - Market and timezone controls cover USA, UAE, Europe, and India. English is the initial language.
 - Healthcare uses its own Supabase project and private schema, separate from HVAC. The Worker is the only database client; the browser never receives database credentials.
-- The Retell draft agent has ten custom functions (including appointment lookup and confirmation) and is unpublished with no phone number. The Worker only answers allowlisted test numbers, and none are configured, so no call can change demo data.
-- Texts and reminders are simulated only. No SMS provider is connected and no text is sent. Live calls and SMS are hard-wired off in the Worker.
-- No real patient data, uploaded file contents, phone calls, or texts are used by this public demo.
+- **"Call me" demo calls.** Like the HVAC site, a visitor can enter a US number or an Indian mobile (+91), tick consent, pass a Cloudflare Turnstile check, and receive one AI call. The Worker asks Retell to call from the shared demo number (+1 512 823 1502) with the Healthcare agent as a one-time override, so the number's own settings (HVAC) are not changed. Limits: 10 visitor calls a day, 3 per IP a day, one per number every 30 minutes, 5 minutes per call; the owner's numbers (`RETELL_TEST_NUMBERS`) are exempt. Only salted hashes of the number and IP are stored. `DEMO_CALLS = "off"` in `wrangler.toml` (or the Cloudflare dashboard) stops new calls at once.
+- The Retell agent has ten custom functions (including appointment lookup and confirmation). Its tools only act for calls this Worker started or for allowlisted test numbers.
+- Texts and reminders are simulated only. No SMS provider is connected and no text is sent.
+- No real patient data or uploaded file contents are used by this public demo, and the demo keeps no call recording or transcript.
 
 ## Run locally
 

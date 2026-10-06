@@ -70,16 +70,38 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 12_0
   return body as T;
 }
 
+export interface DemoCallsInfo {
+  enabled: boolean;
+  countries?: string[];
+  fromNumber?: string;
+  maxMinutes?: number;
+  maxCallsPerDay?: number;
+}
+
 export interface HealthResponse {
   ok: boolean;
   apiVersion?: number;
   databaseConnected: boolean;
   liveCallsEnabled: boolean;
   liveSmsEnabled: boolean;
+  demoCalls?: DemoCallsInfo;
 }
 
 export function getHealth() {
   return request<HealthResponse>("/api/health", {}, 8_000);
+}
+
+export interface DemoCallResponse {
+  status: "calling";
+  country: "US" | "IN";
+  maskedNumber: string;
+  fromNumber: string;
+  maxMinutes: number;
+}
+
+/** Asks the Worker to place one real AI demo call. Only works against the cloud API. */
+export function requestDemoCall(input: { phoneNumber: string; consent: boolean; turnstileToken: string }) {
+  return request<DemoCallResponse>("/api/demo-call", { method: "POST", body: JSON.stringify(input) }, 20_000);
 }
 
 export const cloudBackend: DemoBackend = {

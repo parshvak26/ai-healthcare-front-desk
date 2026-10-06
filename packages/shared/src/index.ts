@@ -9,3 +9,4 @@ export {
   applyDemoAction, appointmentSummary, findAppointment, isOptedOut, isRequestType, isTaskStatus, normalizeDemoState,
   parseDemoAction, processDueMessages,
 } from "./domain.ts";
+export * from "./phone.ts";

@@ -52,6 +52,8 @@ jobs:
       - name: Build website
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || 'https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev' }}
+          # Public Turnstile site key (shared with the HVAC demo on the same github.io host). Not a secret.
+          VITE_TURNSTILE_SITE_KEY: ${{ vars.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAEl0ElgkF9D_kKtg' }}
         run: npm run build
 
       - name: Upload website files

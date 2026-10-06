@@ -3,6 +3,7 @@
 import {
   DomainError, applyDemoAction, buildAvailability, faqEntries, parseDemoAction, processDueMessages,
 } from "../../../packages/shared/src/index.ts";
+import { demoCallSettings, handleDemoCallRequest } from "./calls.ts";
 import { handleRetellEvent, handleRetellFunction, maxFunctionBodyBytes } from "./retell.ts";
 import type { WebhookResult } from "./retell.ts";
 import { configured, consumeRateLimit, loadSnapshot, mutateSnapshot, pingDatabase } from "./store.ts";
@@ -101,8 +102,15 @@ export async function fetchHandler(request: Request, env: Env): Promise<Response
       if (configured(env)) {
         try { await pingDatabase(env); databaseConnected = true; } catch { /* Health stays generic and never exposes provider details. */ }
       }
-      // Live channels are hard-wired off: there is no code path in this Worker that places a call or sends a text.
-      return reply(request, env, requestId, 200, { ok: true, mode: "synthetic-demo", apiVersion, databaseConnected, liveCallsEnabled: false, liveSmsEnabled: false, requestId });
+      // SMS is hard-wired off. Outbound demo calls exist only when every call setting is present (see calls.ts).
+      const calls = demoCallSettings(env);
+      return reply(request, env, requestId, 200, {
+        ok: true, mode: "synthetic-demo", apiVersion, databaseConnected, liveCallsEnabled: calls.enabled, liveSmsEnabled: false,
+        demoCalls: calls.enabled
+          ? { enabled: true, countries: ["US", "IN"], fromNumber: calls.fromNumber, maxMinutes: Math.round(calls.maxCallDurationSeconds / 60), maxCallsPerDay: calls.maxCallsPerDay }
+          : { enabled: false },
+        requestId,
+      });
     }
 
     if (url.pathname.startsWith("/webhooks/retell/") && request.method === "POST") {
@@ -123,6 +131,12 @@ export async function fetchHandler(request: Request, env: Env): Promise<Response
     }
     if (url.pathname === "/api/demo/actions" && request.method === "POST") {
       return reply(request, env, requestId, 200, await handleAction(request, env));
+    }
+    if (url.pathname === "/api/demo-call" && request.method === "POST") {
+      const result = await handleDemoCallRequest(await readJson(request), clientIp(request), env);
+      const response = reply(request, env, requestId, result.status, result.body);
+      if (result.retryAfter) response.headers.set("Retry-After", String(result.retryAfter));
+      return response;
     }
     if (url.pathname === "/api/appointments/availability" && request.method === "POST") {
       await consumeRateLimit(env, clientIp(request), "read");

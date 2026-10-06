@@ -5,11 +5,12 @@ import {
   voiceRequestTypes,
 } from "../../../packages/shared/src/index.ts";
 import type { DemoAction, RequestType } from "../../../packages/shared/src/index.ts";
+import { demoCallSource } from "./calls.ts";
 import { configured, loadSnapshot, mutateSnapshot, recordCallEvent } from "./store.ts";
 import type { Env } from "./store.ts";
 
 type JsonRecord = Record<string, unknown>;
-interface RetellCall { call_id?: unknown; from_number?: unknown }
+interface RetellCall { call_id?: unknown; from_number?: unknown; agent_id?: unknown; direction?: unknown; metadata?: unknown }
 
 const encoder = new TextEncoder();
 const signatureTolerance = 5 * 60 * 1000;
@@ -36,6 +37,18 @@ export function isAllowedCaller(call: RetellCall, env: Env) {
   const number = typeof call.from_number === "string" ? normalizeNumber(call.from_number) : "";
   const allowlist = (env.RETELL_TEST_NUMBERS || "").split(",").map(normalizeNumber).filter(Boolean);
   return Boolean(number && allowlist.includes(number));
+}
+
+/**
+ * Tools answer two kinds of calls: inbound calls from an allowlisted owner number, and outbound demo calls this
+ * Worker started for the Healthcare agent. Only holders of the Retell API key can set call metadata, and the request
+ * signature has already been verified, so the metadata marker cannot be forged by a caller.
+ */
+export function isTrustedCall(call: RetellCall, env: Env) {
+  if (isAllowedCaller(call, env)) return true;
+  const metadata = call.metadata && typeof call.metadata === "object" ? call.metadata as Record<string, unknown> : {};
+  return Boolean(env.RETELL_AGENT_ID && call.agent_id === env.RETELL_AGENT_ID
+    && metadata.source === demoCallSource && (call.direction === undefined || call.direction === "outbound"));
 }
 
 function text(args: JsonRecord, name: string, label: string, max = 100) {
@@ -162,7 +175,7 @@ export async function handleRetellFunction(raw: string, signature: string | null
   let body: JsonRecord;
   try { body = JSON.parse(raw) as JsonRecord; } catch { return { status: 400, body: { error: { code: "invalid_json", message: "The voice request was not valid JSON." } } }; }
   const call = (body.call && typeof body.call === "object" ? body.call : {}) as RetellCall;
-  if (!isAllowedCaller(call, env)) return { status: 403, body: { error: { code: "test_caller_only", message: "This demo is limited to the configured test phone numbers." } } };
+  if (!isTrustedCall(call, env)) return { status: 403, body: { error: { code: "test_caller_only", message: "This demo only answers its own demo calls and approved test numbers." } } };
   const name = typeof body.name === "string" ? body.name : "";
   const args = (body.args && typeof body.args === "object" && !Array.isArray(body.args) ? body.args : {}) as JsonRecord;
   const callId = typeof call.call_id === "string" && call.call_id.length <= 120 ? call.call_id : "";
@@ -181,7 +194,7 @@ export async function handleRetellEvent(raw: string, signature: string | null, e
   let body: JsonRecord;
   try { body = JSON.parse(raw) as JsonRecord; } catch { return { status: 400, body: { error: { code: "invalid_json", message: "The voice event was not valid JSON." } } }; }
   const call = (body.call && typeof body.call === "object" ? body.call : {}) as RetellCall;
-  if (!isAllowedCaller(call, env)) return { status: 403, body: { error: { code: "test_caller_only", message: "Only configured demo test calls are accepted." } } };
+  if (!isTrustedCall(call, env)) return { status: 403, body: { error: { code: "test_caller_only", message: "Only this demo's own calls are accepted." } } };
   const callId = typeof call.call_id === "string" ? call.call_id : "";
   const event = typeof body.event === "string" ? body.event : "";
   if (!callId || callId.length > 120 || !event || event.length > 60) return { status: 400, body: { error: { code: "invalid_request", message: "The voice event is missing required fields." } } };

@@ -23,6 +23,19 @@ From the project folder on your own computer (where Wrangler and GitHub are sign
 
 The first request after the Worker update upgrades the stored snapshot in place (adds the activity history and text preferences). No Supabase migration is needed.
 
+## "Call me" demo calls (one-time setup)
+
+The Worker can place one AI demo call per request from the shared Retell number `+1 512 823 1502`, using the Healthcare agent as a per-call override (`override_agent_id`, `override_agent_version: latest_published`). The number's Retell configuration, which belongs to the HVAC demo, is never changed. Settings live in `wrangler.toml` (`DEMO_CALLS`, `RETELL_FROM_NUMBER`, `RETELL_AGENT_ID`, `TURNSTILE_HOSTNAME`, limits). Calls stay off until all of these are in place:
+
+1. Supabase: run `supabase/migrations/20261006000100_healthcare_demo_calls.sql` (adds the private `healthcare.demo_call_requests` table and two service-role functions).
+2. Retell: publish the Healthcare agent once (calls use the latest published version).
+3. Cloudflare secrets, from this folder:
+   - `npx wrangler secret put TURNSTILE_SECRET_KEY` — the secret of the Turnstile widget that already serves `parshvak26.github.io` for the HVAC demo (Cloudflare dashboard → Turnstile → that widget → Settings). The website uses its public site key.
+   - `npx wrangler secret put RETELL_TEST_NUMBERS` — your own number(s) in E.164, comma-separated. These skip the daily limits.
+4. `npm run deploy:api`, then confirm `/api/health` shows `"liveCallsEnabled": true`.
+
+Cost: Retell lists voice AI at $0.07–$0.31/min (this agent shows about $0.139/min) plus about $0.015/min telephony; a 5-minute call is roughly $0.75. With 10 visitor calls a day the visitor worst case is about $7.50/day, plus your own test calls. Retell-purchased numbers call US numbers by default; calls to India may need Retell to enable the country and can cost more. To stop calls immediately, set `DEMO_CALLS` to `off` in the Worker's settings.
+
 ## Step 1 — Website
 
 The `Build and deploy demo website` workflow installs the locked dependencies, type-checks, runs the automated tests, builds `apps/web`, and publishes it to GitHub Pages. The repository must use the **GitHub Actions** Pages source. The repository is public so Pages works on the free GitHub plan.
