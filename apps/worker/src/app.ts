@@ -78,7 +78,7 @@ async function handleAction(request: Request, env: Env) {
   if (typeof key !== "string" || !idempotencyKeyPattern.test(key)) throw new DomainError(400, "invalid_idempotency_key", "Each demo change needs a request ID.");
   const action = parseDemoAction(body.action);
   const { snapshot, value } = await mutateSnapshot(env, (state) => {
-    const outcome = applyDemoAction(state, action, { now: Date.now(), channel: "Staff console", key: `web|${key}`, random: Math.random });
+    const outcome = applyDemoAction(state, action, { now: Date.now(), channel: "Staff console", key: `web|${key}`, random: Math.random, seedTimezone: env.CLINIC_TIMEZONE });
     return { state: outcome.state, changed: outcome.changed, value: outcome };
   });
   return {

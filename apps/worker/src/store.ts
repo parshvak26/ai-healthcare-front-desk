@@ -54,7 +54,8 @@ export async function pingDatabase(env: Env) {
 }
 
 export async function consumeRateLimit(env: Env, clientIp: string, kind: "read" | "write") {
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(clientIp));
+  // Separate buckets for reads and writes, so browsing availability or polling cannot block a booking.
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(`${clientIp}|${kind}`));
   const key = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
   const count = await rpc(env, "healthcare_consume_demo_rate_limit", { p_client_hash: key, p_window_seconds: 60 });
   if (typeof count !== "number" || !Number.isInteger(count)) throw databaseError();

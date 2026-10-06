@@ -103,8 +103,10 @@ function App() {
   const [search, setSearch] = useState("");
   const now = useNow();
 
-  const accept = useCallback((next: DemoSnapshot) => {
-    if (next.revision < revisionRef.current && backendRef.current?.kind === "cloud") return;
+  // Poll results that arrive after a newer save are ignored. A save's own response is always applied: it is the
+  // server's answer to this user's action, even if the stored revision was ever reset.
+  const accept = useCallback((next: DemoSnapshot, fromAction = false) => {
+    if (!fromAction && next.revision < revisionRef.current && backendRef.current?.kind === "cloud") return;
     revisionRef.current = next.revision;
     setSnapshot(next);
   }, []);
@@ -174,7 +176,7 @@ function App() {
     setBusy(true);
     try {
       const response = await backend.perform(action, key);
-      accept(response);
+      accept(response, true);
       setToast({ tone: "success", text: response.result.appointment && action.type === "book_appointment"
         ? `Appointment confirmed · ${response.result.appointment.reference}`
         : response.result.message });
@@ -320,13 +322,13 @@ function App() {
 
       {showBooking && backendRef.current && <SlotModal mode="book" backend={backendRef.current} clinicTimezone={clinicTimezone} onClose={() => setShowBooking(false)}
         onSubmit={async ({ patient, appointmentType, slot, key }) => {
-          const ok = await perform({ type: "book_appointment", patient, appointmentType, startAt: slot.startAt, timezone: slot.timezone }, key);
+          const ok = await perform({ type: "book_appointment", patient, appointmentType, startAt: slot.startAt, timezone: slot.timezone, provider: slot.provider }, key);
           if (ok) { setShowBooking(false); setPage("Appointments"); }
           return ok;
         }} />}
       {moving && backendRef.current && <SlotModal mode="move" appointment={moving} backend={backendRef.current} clinicTimezone={moving.timezone || clinicTimezone} onClose={() => setMoving(null)}
         onSubmit={async ({ slot, key }) => {
-          const ok = await perform({ type: "reschedule_appointment", reference: moving.reference, patient: moving.patient, newStartAt: slot.startAt, timezone: slot.timezone }, key);
+          const ok = await perform({ type: "reschedule_appointment", reference: moving.reference, patient: moving.patient, newStartAt: slot.startAt, timezone: slot.timezone, provider: slot.provider }, key);
           if (ok) setMoving(null);
           return ok;
         }} />}
@@ -598,8 +600,9 @@ function SlotModal({ mode, appointment, backend, clinicTimezone, onClose, onSubm
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [reload, setReload] = useState(0);
-  // One key per open dialog: pressing confirm again after a network error cannot create a second booking.
-  const key = useMemo(() => newIdempotencyKey(), []);
+  // One key per distinct choice: pressing confirm again after a network error reuses it (no second booking),
+  // while changing the patient, type, or time starts a new request.
+  const key = useMemo(() => newIdempotencyKey(), [patient, appointmentType, selected]);
 
   useEffect(() => {
     let active = true;
@@ -640,11 +643,12 @@ function SlotModal({ mode, appointment, backend, clinicTimezone, onClose, onSubm
 }
 
 function WaitlistModal({ clinicTimezone, busy, onClose, onSubmit }: { clinicTimezone: string; busy: boolean; onClose: () => void; onSubmit: (action: DemoAction, key: string) => Promise<void> }) {
-  const key = useMemo(() => newIdempotencyKey(), []);
-  return <Modal labelledBy="waitlist-title" onClose={onClose}><div className="modal-header"><div><span className="modal-kicker">SAMPLE WAITLIST</span><h2 id="waitlist-title">Add a waitlist request</h2><p>Use a fictional patient and preferred date.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><form onSubmit={(event) => {
+  // Same request, same key; any edit to the form starts a new request.
+  const keyRef = useRef(newIdempotencyKey());
+  return <Modal labelledBy="waitlist-title" onClose={onClose}><div className="modal-header"><div><span className="modal-kicker">SAMPLE WAITLIST</span><h2 id="waitlist-title">Add a waitlist request</h2><p>Use a fictional patient and preferred date.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><form onChange={() => { keyRef.current = newIdempotencyKey(); }} onSubmit={(event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    void onSubmit({ type: "join_waitlist", patient: String(form.get("patient") || ""), appointmentType: String(form.get("appointmentType") || ""), preferredDate: String(form.get("preferredDate") || ""), timezone: clinicTimezone }, key);
+    void onSubmit({ type: "join_waitlist", patient: String(form.get("patient") || ""), appointmentType: String(form.get("appointmentType") || ""), preferredDate: String(form.get("preferredDate") || ""), timezone: clinicTimezone }, keyRef.current);
   }}>
     <label className="form-label">Fictional patient<select name="patient" required defaultValue=""><option value="" disabled>Choose sample patient</option>{demoPatients.map((patient) => <option key={patient}>{patient}</option>)}</select></label>
     <label className="form-label">Appointment type<select name="appointmentType">{appointmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>

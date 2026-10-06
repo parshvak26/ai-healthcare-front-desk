@@ -70,8 +70,8 @@ export interface AvailabilityQuery {
   ignoreAppointmentId?: string;
 }
 
-export function buildAvailability(state: Pick<DemoState, "appointments">, query: AvailabilityQuery): AvailabilitySlot[] {
-  const { date, appointmentType, timezone, now } = query;
+/** Future start times on the clinic grid for one local date, ignoring who is free. */
+function slotGrid(date: string, appointmentType: string, timezone: string, now: number) {
   if (!Object.hasOwn(serviceDurations, appointmentType)) throw new DomainError(400, "invalid_appointment_type", "Choose one of the sample appointment types.");
   if (!isDateKey(date)) throw new DomainError(400, "invalid_date", "Use a valid date like 2026-10-15.");
   if (!isTimezone(timezone)) throw new DomainError(400, "invalid_timezone", "Choose a valid timezone for the sample schedule.");
@@ -80,17 +80,58 @@ export function buildAvailability(state: Pick<DemoState, "appointments">, query:
   if (date > addDaysToDateKey(today, bookingHorizonDays)) throw new DomainError(400, "date_out_of_range", "Choose a date within the next year.");
   if (!(clinicHours.openWeekdays as readonly number[]).includes(weekdayOfDateKey(date))) return [];
   const duration = serviceDurations[appointmentType];
-  const slots: AvailabilitySlot[] = [];
+  const starts: string[] = [];
   for (let minutes = clinicHours.openMinute; minutes + duration <= clinicHours.closeMinute; minutes += clinicHours.slotStepMinutes) {
     const time = `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
     const startAt = zonedTimeToUtc(date, time, timezone);
-    if (!startAt) continue;
-    const startMs = Date.parse(startAt);
-    if (startMs <= now) continue;
-    const provider = providers.find((item) => !providerIsBusy(state, item.name, startMs, appointmentType, query.ignoreAppointmentId));
-    if (provider) slots.push({ startAt, timezone, provider: provider.name, location: provider.location, localTime: formatLocalLong(startAt, timezone) });
+    if (startAt && Date.parse(startAt) > now) starts.push(startAt);
+  }
+  return starts;
+}
+
+function toSlot(startAt: string, timezone: string, provider: (typeof providers)[number]): AvailabilitySlot {
+  return { startAt, timezone, provider: provider.name, location: provider.location, localTime: formatLocalLong(startAt, timezone) };
+}
+
+export function buildAvailability(state: Pick<DemoState, "appointments">, query: AvailabilityQuery): AvailabilitySlot[] {
+  const slots: AvailabilitySlot[] = [];
+  for (const startAt of slotGrid(query.date, query.appointmentType, query.timezone, query.now)) {
+    const provider = providers.find((item) => !providerIsBusy(state, item.name, Date.parse(startAt), query.appointmentType, query.ignoreAppointmentId));
+    if (provider) slots.push(toSlot(startAt, query.timezone, provider));
   }
   return slots;
+}
+
+export interface SlotRequest {
+  startMs: number;
+  appointmentType: string;
+  timezone: string;
+  now: number;
+  /** When given, only this provider may take the slot (the one the caller or staff member was shown). */
+  provider?: string;
+  ignoreAppointmentId?: string;
+}
+
+/** The exact slot being confirmed, or null if that time (with that provider, if named) is no longer free. */
+export function resolveSlot(state: Pick<DemoState, "appointments">, request: SlotRequest): AvailabilitySlot | null {
+  if (request.provider !== undefined && !providers.some((item) => item.name === request.provider)) {
+    throw new DomainError(400, "invalid_provider", "Choose one of the sample providers.");
+  }
+  const date = localDateKey(request.startMs, request.timezone);
+  const startAt = slotGrid(date, request.appointmentType, request.timezone, request.now)
+    .find((item) => Math.abs(Date.parse(item) - request.startMs) < MINUTE);
+  if (!startAt) return null;
+  const provider = providers.find((item) => (request.provider === undefined || item.name === request.provider)
+    && !providerIsBusy(state, item.name, Date.parse(startAt), request.appointmentType, request.ignoreAppointmentId));
+  return provider ? toSlot(startAt, request.timezone, provider) : null;
+}
+
+/** True when the same sample patient already has an active visit overlapping this time. */
+export function patientIsBusy(state: Pick<DemoState, "appointments">, patient: string, startMs: number, type: string, ignoreAppointmentId?: string) {
+  const endMs = startMs + (serviceDurations[type] || 30) * MINUTE;
+  return state.appointments.some((item) => item.patient === patient && item.id !== ignoreAppointmentId
+    && (item.status === "Confirmed" || item.status === "Needs confirmation")
+    && startMs < appointmentEnd(item) && Date.parse(item.startAt) < endMs);
 }
 
 /** Moves a simulated text out of quiet hours (clinic local time) to the next allowed minute. */

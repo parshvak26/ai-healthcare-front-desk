@@ -35,7 +35,8 @@ export function nextOpenDateKey(timeZone: string, now = Date.now()) {
   let date = todayKey(timeZone, now);
   const parts = localParts(now, timeZone);
   const isOpenDay = (key: string) => (clinicHours.openWeekdays as readonly number[]).includes(weekdayOfDateKey(key));
-  if (!isOpenDay(date) || parts.hour * 60 + parts.minute >= clinicHours.closeMinute - 30) date = addDaysToDateKey(date, 1);
+  // After the last start time for the longest visit type, default to the next opening day.
+  if (!isOpenDay(date) || parts.hour * 60 + parts.minute >= clinicHours.closeMinute - 60) date = addDaysToDateKey(date, 1);
   while (!isOpenDay(date)) date = addDaysToDateKey(date, 1);
   return date;
 }

@@ -129,8 +129,8 @@ export interface AvailabilitySlot {
 export type RequestType = "callback" | "refill" | "records" | "billing" | "documents" | "faq" | "accessibility" | "faq_review";
 
 export type DemoAction =
-  | { type: "book_appointment"; patient: string; appointmentType: string; startAt: string; timezone: string }
-  | { type: "reschedule_appointment"; reference: string; patient: string; newStartAt: string; timezone: string }
+  | { type: "book_appointment"; patient: string; appointmentType: string; startAt: string; timezone: string; provider?: string }
+  | { type: "reschedule_appointment"; reference: string; patient: string; newStartAt: string; timezone: string; provider?: string }
   | { type: "cancel_appointment"; reference: string; patient: string }
   | { type: "confirm_appointment"; reference: string; patient: string }
   | { type: "record_attendance"; reference: string; outcome: "attended" | "missed" }
@@ -151,6 +151,8 @@ export interface ActionContext {
   /** Idempotency key: the same key always produces the same record IDs, so retries cannot duplicate work. */
   key: string;
   random: () => number;
+  /** Clinic timezone used when the demo is reset. Defaults to the catalog clinic timezone. */
+  seedTimezone?: string;
 }
 
 export interface ActionOutcome {

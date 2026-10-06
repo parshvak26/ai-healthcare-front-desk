@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  applyDemoAction, buildAvailability, createSeedState, localParts, normalizeDemoState, outsideQuietHours, overlapping,
-  parseDemoAction, processDueMessages, searchApprovedFaq, validateDemoState, zonedTimeToUtc,
+  addDaysToDateKey, applyDemoAction, buildAvailability, createSeedState, isTimezone, localParts, normalizeDemoState,
+  outsideQuietHours, overlapping, parseDemoAction, processDueMessages, searchApprovedFaq, validateDemoState,
+  weekdayOfDateKey, zonedTimeToUtc,
 } from "../src/index.ts";
 import type { ActionContext, DemoAction, DemoState } from "../src/index.ts";
 
@@ -122,6 +123,82 @@ describe("booking", () => {
     const optedOut = run(seed, { type: "book_appointment", patient: "Alex Morgan", appointmentType: "Follow-up visit", startAt, timezone: tz }, { now: lateNight });
     const texts = optedOut.state.messages.filter((item) => item.appointmentReference === optedOut.appointment!.reference);
     assert.ok(texts.length > 0 && texts.every((item) => item.status === "Suppressed (opt-out)"));
+  });
+});
+
+describe("booking edge cases found in review", () => {
+  it("treats the same request after a cancellation as a new booking, not the cancelled one", () => {
+    let state = createSeedState(NOW);
+    const startAt = zonedTimeToUtc("2026-10-12", "10:00", tz)!;
+    const action: DemoAction = { type: "book_appointment", patient: "Taylor Reed", appointmentType: "Follow-up visit", startAt, timezone: tz };
+    const first = run(state, action, { key: "voice-call|create" });
+    state = run(first.state, { type: "cancel_appointment", reference: first.appointment!.reference, patient: "Taylor Reed" }).state;
+    const again = run(state, action, { key: "voice-call|create" });
+    assert.equal(again.changed, true);
+    assert.equal(again.appointment!.status, "Confirmed");
+    assert.notEqual(again.appointment!.id, first.appointment!.id);
+    assert.equal(run(again.state, action, { key: "voice-call|create" }).changed, false, "a replay of the rebook is still idempotent");
+  });
+
+  it("does not return an earlier booking when the same key is reused for a different time", () => {
+    const seed = createSeedState(NOW);
+    const first = run(seed, { type: "book_appointment", patient: "Jordan Lee", appointmentType: "Follow-up visit", startAt: zonedTimeToUtc("2026-10-12", "10:00", tz)!, timezone: tz }, { key: "dialog-key" });
+    const second = run(first.state, { type: "book_appointment", patient: "Jordan Lee", appointmentType: "Follow-up visit", startAt: zonedTimeToUtc("2026-10-12", "13:00", tz)!, timezone: tz }, { key: "dialog-key" });
+    assert.equal(second.changed, true);
+    assert.equal(second.appointment!.startAt, zonedTimeToUtc("2026-10-12", "13:00", tz));
+  });
+
+  it("books the provider that was shown, or refuses", () => {
+    let state = createSeedState(NOW);
+    const startAt = zonedTimeToUtc("2026-10-12", "09:00", tz)!;
+    state = run(state, { type: "book_appointment", patient: "Maya Patel", appointmentType: "Consultation", startAt, timezone: tz, provider: "Dr. Avery Chen" }).state;
+    assert.throws(() => run(state, { type: "book_appointment", patient: "Jordan Lee", appointmentType: "Consultation", startAt, timezone: tz, provider: "Dr. Avery Chen" }), { code: "slot_unavailable" });
+    const other = run(state, { type: "book_appointment", patient: "Jordan Lee", appointmentType: "Consultation", startAt, timezone: tz, provider: "Dr. Noah Rivera" });
+    assert.equal(other.appointment!.location, "North clinic");
+  });
+
+  it("will not double-book one patient at the same time", () => {
+    const startAt = zonedTimeToUtc("2026-10-12", "09:00", tz)!;
+    const state = run(createSeedState(NOW), { type: "book_appointment", patient: "Maya Patel", appointmentType: "Consultation", startAt, timezone: tz }).state;
+    assert.throws(() => run(state, { type: "book_appointment", patient: "Maya Patel", appointmentType: "Consultation", startAt, timezone: tz }), { code: "patient_busy" });
+  });
+
+  it("refuses a booking when the schedule is full instead of deleting active visits", () => {
+    let state = createSeedState(NOW);
+    let date = "2026-10-12";
+    const patients = ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"];
+    let n = 0;
+    while (state.appointments.length < 100) {
+      for (const slot of buildAvailability(state, { date, appointmentType: "Follow-up visit", timezone: tz, now: NOW })) {
+        if (state.appointments.length >= 100) break;
+        try { state = run(state, { type: "book_appointment", patient: patients[n % 5], appointmentType: "Follow-up visit", startAt: slot.startAt, timezone: tz, provider: slot.provider }).state; } catch { /* patient busy: try the next slot */ }
+        n += 1;
+      }
+      do { date = addDaysToDateKey(date, 1); } while ([0, 6].includes(weekdayOfDateKey(date)));
+    }
+    const before = state.appointments.filter((item) => item.status === "Confirmed").length;
+    const [slot] = buildAvailability(state, { date, appointmentType: "Follow-up visit", timezone: tz, now: NOW });
+    assert.throws(() => run(state, { type: "book_appointment", patient: "Maya Patel", appointmentType: "Follow-up visit", startAt: slot.startAt, timezone: tz }), (error: { code: string }) => ["schedule_full", "demo_full"].includes(error.code));
+    assert.equal(state.appointments.filter((item) => item.status === "Confirmed").length, before);
+  });
+
+  it("refuses new staff tasks when the queue is full of open work", () => {
+    let state = createSeedState(NOW);
+    while (state.tasks.length < 100) state = run(state, { type: "create_task", requestType: "callback" }).state;
+    assert.throws(() => run(state, { type: "create_task", requestType: "callback" }), { code: "demo_full" });
+  });
+
+  it("keeps the cancellation confirmation itself deliverable", () => {
+    const cancelled = run(createSeedState(NOW), { type: "cancel_appointment", reference: "DEMO-4812", patient: "Maya Patel" }).state;
+    const processed = processDueMessages(cancelled, NOW + 60_000).state;
+    assert.equal(processed.messages.find((item) => item.appointmentReference === "DEMO-4812" && item.purpose === "Cancellation confirmation")!.status, "Delivered (demo)");
+  });
+
+  it("accepts IANA timezone names only", () => {
+    assert.equal(isTimezone("Asia/Kolkata"), true);
+    assert.equal(isTimezone("America/Argentina/Buenos_Aires"), true);
+    assert.equal(isTimezone("+05:00"), false);
+    assert.equal(isTimezone("Etc/GMT+5"), false);
   });
 });
 

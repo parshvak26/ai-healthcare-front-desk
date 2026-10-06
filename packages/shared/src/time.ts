@@ -25,7 +25,7 @@ function partsFormatter(timeZone: string) {
 }
 
 export function isTimezone(value: unknown): value is string {
-  if (typeof value !== "string" || value.length < 1 || value.length > 80) return false;
+  if (typeof value !== "string" || value.length < 1 || value.length > 80 || !/^[A-Za-z_]+(?:\/[A-Za-z0-9_-]+){0,2}$/.test(value)) return false;
   try {
     new Intl.DateTimeFormat("en", { timeZone: value }).format();
     return true;

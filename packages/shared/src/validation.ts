@@ -6,7 +6,7 @@ import {
 import { isDateKey, isTimezone, isUtcTimestamp } from "./time.ts";
 import type { ActivityAction, Channel, DemoState } from "./types.ts";
 
-export const limits = { appointments: 100, tasks: 100, referrals: 100, messages: 200, waitlist: 100, events: 100 } as const;
+export const limits = { appointments: 100, tasks: 100, referrals: 100, messages: 400, waitlist: 100, events: 100 } as const;
 
 const patientNames = new Set<string>(allowedDemoPatients);
 const referencePattern = /^DEMO-\d{4}$/;

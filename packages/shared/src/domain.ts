@@ -4,8 +4,8 @@ import {
   allowedDemoPatients, defaultClinicTimezone, requestTemplates, requestTypes, systemTaskTemplates, typesNeedingDocuments,
 } from "./catalog.ts";
 import {
-  DAY, DomainError, HOUR, MINUTE, appointmentTimezone, buildAvailability, documentFollowUpTime, documentTaskDue, iso,
-  messageText, reminderTime, outsideQuietHours, stableId,
+  DAY, DomainError, HOUR, MINUTE, appointmentTimezone, documentFollowUpTime, documentTaskDue, iso, messageText,
+  outsideQuietHours, patientIsBusy, reminderTime, resolveSlot, stableId,
 } from "./schedule.ts";
 import { createSeedState } from "./seed.ts";
 import { formatLocalLong, isDateKey, isTimezone, localDateKey } from "./time.ts";
@@ -19,6 +19,7 @@ import type {
 
 export { DomainError } from "./schedule.ts";
 
+const activeStatuses = new Set<string>(["Confirmed", "Needs confirmation"]);
 const pendingMessage = (status: MessageStatus) => status === "Scheduled (demo)" || status === "Queued (demo)";
 const patientOrder = (name: string) => (allowedDemoPatients as readonly string[]).indexOf(name);
 const finishedAppointment = (item: Appointment) => item.status === "Cancelled" || item.status === "Completed" || item.status === "Missed";
@@ -61,6 +62,7 @@ export function isOptedOut(state: Pick<DemoState, "smsPreferences">, patient: st
   return state.smsPreferences.some((item) => item.patient === patient && item.optedOut);
 }
 
+/** Drops the oldest finished records until the list fits. Open or pending records are never removed. */
 function trim<T>(list: T[], max: number, removable: (item: T) => boolean) {
   if (list.length <= max) return list;
   const result = [...list];
@@ -69,11 +71,13 @@ function trim<T>(list: T[], max: number, removable: (item: T) => boolean) {
   for (let i = result.length - 1; i >= 0 && excess > 0; i -= 1) {
     if (removable(result[i])) { result.splice(i, 1); excess -= 1; }
   }
-  return excess > 0 ? result.slice(0, max) : result;
+  return result;
 }
 
+const demoFull = () => new DomainError(409, "demo_full", "The shared sample data is full. Reset the demo data in Settings and try again.");
+
 function prune(state: DemoState): DemoState {
-  return {
+  const next: DemoState = {
     ...state,
     tasks: trim(state.tasks, limits.tasks, (item) => item.status === "Done"),
     referrals: trim(state.referrals, limits.referrals, (item) => item.status === "Received"),
@@ -81,6 +85,9 @@ function prune(state: DemoState): DemoState {
     waitlist: trim(state.waitlist, limits.waitlist, (item) => item.status === "Cancelled" || item.status === "Booked"),
     events: state.events.slice(0, limits.events),
   };
+  // Refuse the change rather than silently deleting someone's open work.
+  if (next.tasks.length > limits.tasks || next.referrals.length > limits.referrals || next.messages.length > limits.messages || next.waitlist.length > limits.waitlist) throw demoFull();
+  return next;
 }
 
 function addEvent(state: DemoState, ctx: ActionContext, action: ActivityAction, details: { patient?: string; reference?: string } = {}, part: string = action): DemoState {
@@ -157,16 +164,29 @@ function bookAppointment(state: DemoState, action: Extract<DemoAction, { type: "
   const patient = requirePatient(action.patient);
   const type = requireType(action.appointmentType);
   const timezone = requireTimezone(action.timezone);
-  const id = stableId("apt", ctx.key, "appointment");
-  const existing = state.appointments.find((item) => item.id === id);
-  if (existing) return { state, changed: false, appointment: existing, message: "Sample appointment confirmed. No text was sent." };
   const requested = requireInstant(action.startAt);
-  const slot = buildAvailability(state, { date: localDateKey(requested, timezone), appointmentType: type, timezone, now: ctx.now })
-    .find((item) => Math.abs(Date.parse(item.startAt) - requested) < MINUTE);
+  // A key identifies one booking request. A replay of the same request returns that booking. If the earlier
+  // booking was since cancelled or moved, the same words mean a new request, so it gets a derived key.
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const key = attempt === 0 ? ctx.key : `${ctx.key}|rebook-${attempt}`;
+    const existing = state.appointments.find((item) => item.id === stableId("apt", key, "appointment"));
+    if (!existing) return createBooking(state, { patient, type, timezone, requested, provider: action.provider }, { ...ctx, key });
+    const sameBooking = activeStatuses.has(existing.status) && existing.patient === patient && existing.type === type
+      && Math.abs(Date.parse(existing.startAt) - requested) < MINUTE && (action.provider === undefined || existing.provider === action.provider);
+    if (sameBooking) return { state, changed: false, appointment: existing, message: "Sample appointment confirmed. No text was sent." };
+  }
+  throw new DomainError(409, "request_reused", "Please start a new booking request.");
+}
+
+function createBooking(state: DemoState, input: { patient: string; type: string; timezone: string; requested: number; provider?: string }, ctx: ActionContext): ActionOutcome {
+  const { patient, type, timezone } = input;
+  const id = stableId("apt", ctx.key, "appointment");
+  const slot = resolveSlot(state, { startMs: input.requested, appointmentType: type, timezone, now: ctx.now, provider: input.provider });
   if (!slot) throw new DomainError(409, "slot_unavailable", "That time is no longer available. Offer another sample time.");
+  if (patientIsBusy(state, patient, Date.parse(slot.startAt), type)) throw new DomainError(409, "patient_busy", "That sample patient already has an appointment at that time. Offer another time.");
 
   const appointments = trim(state.appointments, limits.appointments - 1, (item) => finishedAppointment(item) || Date.parse(item.startAt) < ctx.now - DAY);
-  if (appointments.length >= limits.appointments) throw new DomainError(409, "schedule_full", "The sample schedule is full. Reset the demo data and try again.");
+  if (appointments.length >= limits.appointments) throw new DomainError(409, "schedule_full", "The sample schedule is full. Reset the demo data in Settings and try again.");
   const reference = freshReference(state, ctx.random);
   const needsDocuments = typesNeedingDocuments.has(type);
   const appointment: Appointment = {
@@ -198,9 +218,9 @@ function rescheduleAppointment(state: DemoState, action: Extract<DemoAction, { t
   if (Math.abs(Date.parse(appointment.startAt) - requested) < MINUTE) {
     return { state, changed: false, appointment, message: "The sample appointment is already at that time. No text was sent." };
   }
-  const slot = buildAvailability(state, { date: localDateKey(requested, timezone), appointmentType: appointment.type, timezone, now: ctx.now, ignoreAppointmentId: appointment.id })
-    .find((item) => Math.abs(Date.parse(item.startAt) - requested) < MINUTE);
+  const slot = resolveSlot(state, { startMs: requested, appointmentType: appointment.type, timezone, now: ctx.now, provider: action.provider, ignoreAppointmentId: appointment.id });
   if (!slot) throw new DomainError(409, "slot_unavailable", "That time is no longer available. Offer another sample time.");
+  if (patientIsBusy(state, appointment.patient, Date.parse(slot.startAt), appointment.type, appointment.id)) throw new DomainError(409, "patient_busy", "That sample patient already has another appointment at that time. Offer another time.");
   const updated: Appointment = { ...appointment, startAt: slot.startAt, timezone, provider: slot.provider, location: slot.location };
   const reminder = reminderTime(slot.startAt, timezone, ctx.now);
   let hasReminder = false;
@@ -378,7 +398,7 @@ export function applyDemoAction(state: DemoState, action: DemoAction, ctx: Actio
     case "update_task": outcome = updateTask(state, action, ctx); break;
     case "set_sms_preference": outcome = setSmsPreference(state, action, ctx); break;
     case "reset_demo": {
-      const seeded = createSeedState(ctx.now);
+      const seeded = createSeedState(ctx.now, ctx.seedTimezone && isTimezone(ctx.seedTimezone) ? ctx.seedTimezone : undefined);
       outcome = { state: addEvent(seeded, ctx, "Sample data reset", {}, "reset"), changed: true, message: "Sample data restored." };
       break;
     }
@@ -400,7 +420,7 @@ export function processDueMessages(state: DemoState, now: number) {
     changed = true;
     if (isOptedOut(state, recipientPatient(message.recipient))) return { ...message, status: "Suppressed (opt-out)" as const };
     const appointment = message.appointmentReference ? state.appointments.find((item) => item.reference === message.appointmentReference) : undefined;
-    if (appointment && (appointment.status === "Cancelled" || appointment.status === "Missed")) return { ...message, status: "Cancelled (demo)" as const };
+    if (appointment && (appointment.status === "Cancelled" || appointment.status === "Missed") && message.purpose !== "Cancellation confirmation") return { ...message, status: "Cancelled (demo)" as const };
     if (message.purpose === "48-hour missing-document follow-up" && appointment
       && !state.referrals.some((item) => item.reference === appointment.reference && item.status === "Needed")) return { ...message, status: "Cancelled (demo)" as const };
     if (message.purpose === "24-hour appointment reminder" && appointment && Date.parse(appointment.startAt) <= now) return { ...message, status: "Cancelled (demo)" as const };
@@ -451,9 +471,9 @@ export function normalizeDemoState(raw: unknown): { state: DemoState; migrated: 
 
 // ---------- request parsing ----------
 
-const actionShapes: Record<DemoAction["type"], Record<string, "string" | "boolean">> = {
-  book_appointment: { patient: "string", appointmentType: "string", startAt: "string", timezone: "string" },
-  reschedule_appointment: { reference: "string", patient: "string", newStartAt: "string", timezone: "string" },
+const actionShapes: Record<DemoAction["type"], Record<string, "string" | "boolean" | "string?">> = {
+  book_appointment: { patient: "string", appointmentType: "string", startAt: "string", timezone: "string", provider: "string?" },
+  reschedule_appointment: { reference: "string", patient: "string", newStartAt: "string", timezone: "string", provider: "string?" },
   cancel_appointment: { reference: "string", patient: "string" },
   confirm_appointment: { reference: "string", patient: "string" },
   record_attendance: { reference: "string", outcome: "string" },
@@ -477,6 +497,7 @@ export function parseDemoAction(input: unknown): DemoAction {
   for (const key of Object.keys(record)) if (key !== "type" && !Object.hasOwn(shape, key)) throw invalid();
   for (const [key, kind] of Object.entries(shape)) {
     const value = record[key];
+    if (kind === "string?" && value === undefined) continue;
     if (kind === "boolean" ? typeof value !== "boolean" : typeof value !== "string" || value.length < 1 || value.length > 100) throw invalid();
   }
   if (type === "record_attendance" && record.outcome !== "attended" && record.outcome !== "missed") throw invalid();

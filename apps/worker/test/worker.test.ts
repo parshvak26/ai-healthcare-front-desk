@@ -181,6 +181,19 @@ describe("Retell custom functions", () => {
     assert.equal(cancelled.body.appointment.status, "Cancelled");
   });
 
+  it("treats differently formatted repeats as one booking, and a rebook after cancelling as new", async () => {
+    const availability = await retell("get_availability", { date: nextWeekday(), appointment_type: "Follow-up visit" });
+    const slot = availability.body.slots[1];
+    const first = await retell("create_appointment", { patient_name: "Samira Khan", appointment_type: "Follow-up visit", start_at: slot.start_at }, { callId: "call_format" });
+    const reformatted = await retell("create_appointment", { patient_name: "Samira Khan", appointment_type: "Follow-up visit", start_at: slot.start_at.replace(".000Z", "Z"), timezone: "America/Chicago" }, { callId: "call_format" });
+    assert.equal(reformatted.body.reference, first.body.reference);
+    await retell("cancel_appointment", { booking_reference: first.body.reference, verification_name: "Samira Khan" }, { callId: "call_format" });
+    const rebooked = await retell("create_appointment", { patient_name: "Samira Khan", appointment_type: "Follow-up visit", start_at: slot.start_at }, { callId: "call_format" });
+    assert.equal(rebooked.body.success, true);
+    assert.notEqual(rebooked.body.reference, first.body.reference);
+    assert.equal(rebooked.body.appointment.status, "Confirmed");
+  });
+
   it("returns business failures as success=false so the agent can respond", async () => {
     const wrongName = await retell("lookup_appointment", { booking_reference: "DEMO-4812", verification_name: "Jordan Lee" });
     assert.deepEqual([wrongName.status, wrongName.body.success, wrongName.body.error], [200, false, "sample_booking_not_found"]);

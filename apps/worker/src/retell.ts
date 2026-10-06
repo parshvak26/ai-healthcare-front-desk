@@ -49,20 +49,30 @@ function timezoneArg(args: JsonRecord, env: Env) {
   return typeof value === "string" && value.trim() ? value.trim() : env.CLINIC_TIMEZONE || defaultClinicTimezone;
 }
 
-function canonicalArgs(args: JsonRecord) {
-  return JSON.stringify(Object.keys(args).sort().map((key) => [key, args[key]]));
+function optionalText(args: JsonRecord, name: string, max = 100) {
+  return args[name] === undefined || args[name] === null || args[name] === "" ? undefined : text(args, name, name.replace(/_/g, " "), max);
 }
 
-async function runAction(env: Env, action: DemoAction, key: string) {
+/** Same instant, same text: "…00Z" and "…00.000Z" must not count as different requests. */
+function normalizedInstant(value: string) {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : value;
+}
+
+/**
+ * The idempotency key is built from the normalized action, not the raw arguments, so a repeated tool call that
+ * differs only in formatting (an omitted default timezone, a different timestamp spelling) is still one request.
+ */
+async function runAction(env: Env, callId: string, name: string, action: DemoAction) {
+  const key = `${callId}|${name}|${JSON.stringify(action)}`;
   const { value } = await mutateSnapshot(env, (state) => {
-    const outcome = applyDemoAction(state, action, { now: Date.now(), channel: "Voice assistant", key, random: Math.random });
+    const outcome = applyDemoAction(state, action, { now: Date.now(), channel: "Voice assistant", key, random: Math.random, seedTimezone: env.CLINIC_TIMEZONE });
     return { state: outcome.state, changed: outcome.changed, value: outcome };
   });
   return value;
 }
 
 async function tool(name: string, args: JsonRecord, callId: string, env: Env): Promise<JsonRecord> {
-  const key = `${callId}|${name}|${canonicalArgs(args)}`;
   switch (name) {
     case "get_availability": {
       const date = text(args, "date", "date", 10);
@@ -72,34 +82,36 @@ async function tool(name: string, args: JsonRecord, callId: string, env: Env): P
       return {
         success: true, demo: true, date, timezone,
         slots: slots.map((slot) => ({ start_at: slot.startAt, local_time: slot.localTime, provider: slot.provider, location: slot.location })),
-        message: slots.length ? "Offer only these sample times, read as local_time." : "No sample openings on that date. Offer another date or the demo waitlist.",
+        message: slots.length ? "Offer only these sample times, read as local_time. When booking, pass the chosen slot's start_at and provider." : "No sample openings on that date. Offer another date or the demo waitlist.",
       };
     }
     case "create_appointment": {
-      const outcome = await runAction(env, {
+      const provider = optionalText(args, "provider", 60);
+      const outcome = await runAction(env, callId, name, {
         type: "book_appointment", patient: text(args, "patient_name", "sample patient", 60), appointmentType: text(args, "appointment_type", "appointment type", 60),
-        startAt: text(args, "start_at", "appointment time", 40), timezone: timezoneArg(args, env),
-      }, key);
+        startAt: normalizedInstant(text(args, "start_at", "appointment time", 40)), timezone: timezoneArg(args, env), ...(provider ? { provider } : {}),
+      });
       return { success: true, reference: outcome.appointment?.reference, appointment: outcome.appointment && appointmentSummary(outcome.appointment), message: outcome.message };
     }
     case "reschedule_appointment": {
-      const outcome = await runAction(env, {
-        type: "reschedule_appointment", reference: text(args, "booking_reference", "sample booking reference", 20), patient: text(args, "verification_name", "sample patient name", 60),
-        newStartAt: text(args, "new_start_at", "new appointment time", 40), timezone: timezoneArg(args, env),
-      }, key);
+      const provider = optionalText(args, "provider", 60);
+      const outcome = await runAction(env, callId, name, {
+        type: "reschedule_appointment", reference: text(args, "booking_reference", "sample booking reference", 20).toUpperCase(), patient: text(args, "verification_name", "sample patient name", 60),
+        newStartAt: normalizedInstant(text(args, "new_start_at", "new appointment time", 40)), timezone: timezoneArg(args, env), ...(provider ? { provider } : {}),
+      });
       return { success: true, appointment: outcome.appointment && appointmentSummary(outcome.appointment), message: outcome.message };
     }
     case "cancel_appointment":
     case "confirm_appointment": {
-      const outcome = await runAction(env, {
+      const outcome = await runAction(env, callId, name, {
         type: name === "cancel_appointment" ? "cancel_appointment" : "confirm_appointment",
-        reference: text(args, "booking_reference", "sample booking reference", 20), patient: text(args, "verification_name", "sample patient name", 60),
-      }, key);
+        reference: text(args, "booking_reference", "sample booking reference", 20).toUpperCase(), patient: text(args, "verification_name", "sample patient name", 60),
+      });
       return { success: true, appointment: outcome.appointment && appointmentSummary(outcome.appointment), message: outcome.message };
     }
     case "lookup_appointment": {
       const { state } = await loadSnapshot(env);
-      const appointment = findAppointment(state, text(args, "booking_reference", "sample booking reference", 20), text(args, "verification_name", "sample patient name", 60));
+      const appointment = findAppointment(state, text(args, "booking_reference", "sample booking reference", 20).toUpperCase(), text(args, "verification_name", "sample patient name", 60));
       return { success: true, appointment: appointmentSummary(appointment), message: "Read back the local_time, appointment type, and location." };
     }
     case "search_approved_faq": {
@@ -114,19 +126,19 @@ async function tool(name: string, args: JsonRecord, callId: string, env: Env): P
       const requestType = text(args, "request_type", "request type", 30);
       if (!(voiceRequestTypes as string[]).includes(requestType)) throw new DomainError(400, "invalid_request_type", "Choose a supported front-desk request.");
       // One task per request type per call, however many times the model calls the tool.
-      const outcome = await runAction(env, { type: "create_task", requestType: requestType as RequestType }, `${callId}|request_staff_followup|${requestType}`);
+      const outcome = await runAction(env, callId, name, { type: "create_task", requestType: requestType as RequestType });
       return { success: true, message: outcome.message };
     }
     case "join_waitlist": {
-      const outcome = await runAction(env, {
+      const outcome = await runAction(env, callId, name, {
         type: "join_waitlist", patient: text(args, "patient_name", "sample patient", 60), appointmentType: text(args, "appointment_type", "appointment type", 60),
         preferredDate: text(args, "preferred_date", "preferred date", 10), timezone: timezoneArg(args, env),
-      }, key);
+      });
       return { success: true, waitlist_request: outcome.waitlistItem && { preferred_date: outcome.waitlistItem.preferredDate, appointment_type: outcome.waitlistItem.appointmentType, status: outcome.waitlistItem.status }, message: outcome.message };
     }
     case "check_document_status": {
       const { state } = await loadSnapshot(env);
-      const appointment = findAppointment(state, text(args, "booking_reference", "sample booking reference", 20), text(args, "sample_patient_name", "sample patient name", 60));
+      const appointment = findAppointment(state, text(args, "booking_reference", "sample booking reference", 20).toUpperCase(), text(args, "sample_patient_name", "sample patient name", 60));
       const documents = state.referrals.filter((item) => item.reference === appointment.reference).map((item) => ({ document: item.document, status: item.status }));
       return {
         success: true, demo: true, appointment_documents: appointment.documents, documents,

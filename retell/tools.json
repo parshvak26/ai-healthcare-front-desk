@@ -17,7 +17,7 @@
     },
     {
       "name": "create_appointment",
-      "description": "Book a fictional appointment only after the caller confirms one slot returned by get_availability. Use one of the sample names only. Say it is booked only if success is true, and give the returned DEMO reference.",
+      "description": "Book a fictional appointment only after the caller confirms one slot returned by get_availability. Pass that slot's start_at and provider. Use one of the sample names only. Say it is booked only if success is true, and give the returned DEMO reference.",
       "parameters": {
         "type": "object",
         "required": ["patient_name", "appointment_type", "start_at"],
@@ -25,7 +25,8 @@
           "patient_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] },
           "appointment_type": { "type": "string", "enum": ["New patient visit", "Follow-up visit", "Consultation", "Administrative call"] },
           "start_at": { "type": "string", "description": "The start_at value of the chosen slot from get_availability (UTC ISO-8601)." },
-          "timezone": { "type": "string", "description": "IANA clinic timezone used for get_availability. Omit for America/Chicago." }
+          "timezone": { "type": "string", "description": "IANA clinic timezone used for get_availability. Omit for America/Chicago." },
+          "provider": { "type": "string", "enum": ["Dr. Avery Chen", "Dr. Noah Rivera"], "description": "The provider of the chosen slot from get_availability, so the booking matches what the caller was offered." }
         }
       }
     },
@@ -55,7 +56,7 @@
     },
     {
       "name": "reschedule_appointment",
-      "description": "Move a fictional appointment only after matching its sample reference and sample name, checking new availability, and receiving the caller's confirmation.",
+      "description": "Move a fictional appointment only after matching its sample reference and sample name, checking new availability, and receiving the caller's confirmation. Pass the chosen slot's start_at and provider.",
       "parameters": {
         "type": "object",
         "required": ["booking_reference", "verification_name", "new_start_at"],
@@ -63,7 +64,8 @@
           "booking_reference": { "type": "string", "pattern": "^DEMO-[0-9]{4}$" },
           "verification_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] },
           "new_start_at": { "type": "string", "description": "The start_at value of the chosen slot from get_availability (UTC ISO-8601)." },
-          "timezone": { "type": "string", "description": "IANA clinic timezone used for get_availability. Omit for America/Chicago." }
+          "timezone": { "type": "string", "description": "IANA clinic timezone used for get_availability. Omit for America/Chicago." },
+          "provider": { "type": "string", "enum": ["Dr. Avery Chen", "Dr. Noah Rivera"], "description": "The provider of the chosen slot from get_availability, so the booking matches what the caller was offered." }
         }
       }
     },
