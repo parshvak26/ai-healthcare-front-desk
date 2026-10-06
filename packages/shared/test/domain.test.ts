@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   addDaysToDateKey, applyDemoAction, buildAvailability, createSeedState, isTimezone, localParts, normalizeDemoState,
-  outsideQuietHours, overlapping, parseDemoAction, processDueMessages, searchApprovedFaq, validateDemoState,
+  limits, outsideQuietHours, overlapping, parseDemoAction, processDueMessages, searchApprovedFaq, validateDemoState,
   weekdayOfDateKey, zonedTimeToUtc,
 } from "../src/index.ts";
 import type { ActionContext, DemoAction, DemoState } from "../src/index.ts";
@@ -105,9 +105,16 @@ describe("booking", () => {
     assert.throws(() => book("Samira Khan"), { code: "slot_unavailable", status: 409 });
   });
 
-  it("refuses non-sample names and off-grid times", () => {
+  it("takes new names only from voice calls, rejects non-names, and refuses off-grid times", () => {
     const seed = createSeedState(NOW);
-    assert.throws(() => run(seed, { type: "book_appointment", patient: "Real Person", appointmentType: "Consultation", startAt: zonedTimeToUtc("2026-10-12", "09:00", tz)!, timezone: tz }), { code: "sample_name_only" });
+    const startAt = zonedTimeToUtc("2026-10-12", "09:00", tz)!;
+    assert.throws(() => run(seed, { type: "book_appointment", patient: "Real Person", appointmentType: "Consultation", startAt, timezone: tz }), { code: "unknown_patient" });
+    assert.throws(() => run(seed, { type: "book_appointment", patient: "call 555 0100", appointmentType: "Consultation", startAt, timezone: tz }, { channel: "Voice assistant" }), { code: "invalid_name" });
+    const voice = run(seed, { type: "book_appointment", patient: "parshva", appointmentType: "Consultation", startAt, timezone: tz }, { channel: "Voice assistant" });
+    assert.equal(voice.appointment!.patient, "Parshva");
+    // Once the caller's name exists, the console may use it too.
+    const later = zonedTimeToUtc("2026-10-13", "09:00", tz)!;
+    assert.equal(run(voice.state, { type: "book_appointment", patient: "Parshva", appointmentType: "Follow-up visit", startAt: later, timezone: tz }).appointment!.patient, "Parshva");
     assert.throws(() => run(seed, { type: "book_appointment", patient: "Maya Patel", appointmentType: "Consultation", startAt: zonedTimeToUtc("2026-10-12", "09:10", tz)!, timezone: tz }), { code: "slot_unavailable" });
   });
 
@@ -168,9 +175,9 @@ describe("booking edge cases found in review", () => {
     let date = "2026-10-12";
     const patients = ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"];
     let n = 0;
-    while (state.appointments.length < 100) {
+    while (state.appointments.length < limits.appointments) {
       for (const slot of buildAvailability(state, { date, appointmentType: "Follow-up visit", timezone: tz, now: NOW })) {
-        if (state.appointments.length >= 100) break;
+        if (state.appointments.length >= limits.appointments) break;
         try { state = run(state, { type: "book_appointment", patient: patients[n % 5], appointmentType: "Follow-up visit", startAt: slot.startAt, timezone: tz, provider: slot.provider }).state; } catch { /* patient busy: try the next slot */ }
         n += 1;
       }
@@ -184,7 +191,7 @@ describe("booking edge cases found in review", () => {
 
   it("refuses new staff tasks when the queue is full of open work", () => {
     let state = createSeedState(NOW);
-    while (state.tasks.length < 100) state = run(state, { type: "create_task", requestType: "callback" }).state;
+    while (state.tasks.length < limits.tasks) state = run(state, { type: "create_task", requestType: "callback" }).state;
     assert.throws(() => run(state, { type: "create_task", requestType: "callback" }), { code: "demo_full" });
   });
 
@@ -316,10 +323,24 @@ describe("stored data and request validation", () => {
     assert.equal(normalizeDemoState({ appointments: "nope" }), null);
   });
 
+  it("trims lists saved by older versions to today's limits instead of discarding the copy", () => {
+    const seed = createSeedState(NOW);
+    const events = Array.from({ length: 90 }, (_v, i) => ({ ...seed.events[0], id: `evt-old-${i}` }));
+    const result = normalizeDemoState({ ...seed, events });
+    assert.ok(result);
+    assert.equal(result.migrated, true);
+    assert.equal(result.state.events.length, limits.events);
+  });
+
   it("rejects free text and unknown people in a snapshot", () => {
     const seed = createSeedState(NOW);
     assert.equal(validateDemoState({ ...seed, tasks: [{ ...seed.tasks[0], detail: "Patient reports chest pain" }] }), false);
-    assert.equal(validateDemoState({ ...seed, appointments: [{ ...seed.appointments[0], patient: "John Smith" }] }), false);
+    assert.equal(validateDemoState({ ...seed, appointments: [{ ...seed.appointments[0], patient: "John Smith 555-0100" }] }), false);
+    assert.equal(validateDemoState({ ...seed, appointments: [{ ...seed.appointments[0], patient: "john@example.com" }] }), false);
+    assert.equal(validateDemoState({ ...seed, appointments: [{ ...seed.appointments[0], patient: "john smith" }] }), false, "names are stored in canonical form");
+    assert.equal(validateDemoState({ ...seed, appointments: [{ ...seed.appointments[0], patient: "John Smith" }] }), true);
+    const tooMany = seed.waitlist.slice(0, 1).flatMap((item) => Array.from({ length: 21 }, (_v, i) => ({ ...item, id: `wait-x${i}`, patient: `Caller ${"ABCDEFGHIJKLMNOPQRSTU"[i]}` })));
+    assert.equal(validateDemoState({ ...seed, waitlist: tooMany }), false, "at most 20 caller names");
     assert.equal(validateDemoState({ ...seed, extra: [] }), false);
   });
 

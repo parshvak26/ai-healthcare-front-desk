@@ -1,8 +1,13 @@
 SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SECRET_KEY=
+# Also used to verify Retell webhook signatures.
 RETELL_API_KEY=
+# Optional. The owner's own numbers, comma separated, in E.164 form. They skip the phone call limits only.
 RETELL_TEST_NUMBERS=
 # Optional. Defaults to America/Chicago for voice requests that do not name a timezone.
 CLINIC_TIMEZONE=
-# Required for the "Call me" button (Cloudflare Turnstile secret for the parshvak26.github.io widget).
+# Required for the call page (phone and browser calls): Cloudflare Turnstile secret for the parshvak26.github.io widget.
 TURNSTILE_SECRET_KEY=
+
+# Not secrets, so not listed here: DEMO_CALLS, DEMO_WEB_CALLS, RETELL_EVENTS_URL, RETELL_AGENT_VERSION,
+# RETELL_AGENT_ID, RETELL_FROM_NUMBER, TURNSTILE_HOSTNAME and the call limits are plain values in wrangler.toml.

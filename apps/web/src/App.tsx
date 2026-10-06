@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
-  allowedDemoPatients, appointmentTypes, faqEntries, isOptedOut, requestTemplates, searchApprovedFaq,
+  appointmentTypes, faqEntries, isOptedOut, patientNames, processDueMessages, requestTemplates, searchApprovedFaq,
 } from "../../../packages/shared/src/index.ts";
 import type { FaqSearchResult } from "../../../packages/shared/src/index.ts";
-import { CallMePanel } from "./CallMe";
-import { ApiRequestError, apiBaseUrl, cloudBackend, createLocalBackend, getHealth, newIdempotencyKey, requiredApiVersion } from "./lib/api";
+import { CallStatusBar } from "./CallStatusBar";
+import { ApiRequestError, newIdempotencyKey, viewerTimezone } from "./lib/api";
 import type { DemoBackend, DemoCallsInfo } from "./lib/api";
+import { useCall } from "./lib/callController";
+import { useDemo } from "./lib/demoContext";
+import type { Connection } from "./lib/demoContext";
+import { routeHref, takeHeadingFocus } from "./lib/routes";
 import {
   allTimezones, formatDate, formatDateKey, formatDateTime, formatTime, isClinicOpen, marketTimezones, nextOpenDateKey, timezoneLabel, todayKey,
 } from "./lib/timezone";
 import type {
-  ActivityEvent, Appointment, AvailabilitySlot, DemoAction, DemoSnapshot, DemoState, FollowUpTask, Market, RequestType,
+  ActivityEvent, Appointment, AvailabilitySlot, DemoAction, DemoState, FollowUpTask, Market, RequestType,
 } from "./types";
+import "./styles.css";
 
 type Page = "Overview" | "Appointments" | "Waitlist" | "Referrals" | "Follow-ups" | "Messages" | "FAQs" | "Settings";
-type CallIntent = "appointment" | "waitlist" | "faq" | Exclude<RequestType, "faq" | "faq_review">;
-type Connection = "connecting" | "cloud" | "local" | "fallback";
 type Perform = (action: DemoAction, key?: string) => Promise<boolean>;
 interface Toast { tone: "success" | "error"; text: string }
 
@@ -32,8 +35,9 @@ const pages: { name: Page; icon: string; group?: string }[] = [
 ];
 
 const marketNames: Market[] = ["USA", "UAE", "Europe", "India"];
-const demoPatients: readonly string[] = allowedDemoPatients;
 const activeStatuses = new Set(["Confirmed", "Needs confirmation"]);
+/** Voice-assistant changes this recent are tagged "From your call" (only this visitor's calls write to their demo). */
+const fromCallWindowMs = 30 * 60_000;
 
 const pageDescriptions: Record<Page, string> = {
   Overview: "Here’s what needs your attention today.",
@@ -74,6 +78,7 @@ function taskTone(priority: FollowUpTask["priority"]): "amber" | "red" | "neutra
 
 const isPast = (appointment: Appointment, now: number) => Date.parse(appointment.startAt) <= now;
 const needsOutcome = (appointment: Appointment, now: number) => activeStatuses.has(appointment.status) && isPast(appointment, now);
+const fromRecentCall = (event: ActivityEvent, now: number) => event.channel === "Voice assistant" && now - Date.parse(event.at) < fromCallWindowMs;
 
 function useNow(intervalMs = 60_000) {
   const [now, setNow] = useState(() => Date.now());
@@ -84,92 +89,34 @@ function useNow(intervalMs = 60_000) {
   return now;
 }
 
+/** The viewer's own zone first, then the market zones. */
+function displayZones(viewer: string) {
+  return allTimezones.includes(viewer) ? allTimezones : [viewer, ...allTimezones];
+}
+
 function App() {
-  const [connection, setConnection] = useState<Connection>("connecting");
-  const [fallbackReason, setFallbackReason] = useState("");
-  const [snapshot, setSnapshot] = useState<DemoSnapshot | null>(null);
-  const backendRef = useRef<DemoBackend | null>(null);
-  const localRef = useRef<ReturnType<typeof createLocalBackend> | null>(null);
-  const revisionRef = useRef(0);
+  const demo = useDemo();
+  const { busy: callBusy, dismiss: dismissCall } = useCall();
+  const { connection, fallbackReason, backend } = demo;
+  const viewerZone = useMemo(viewerTimezone, []);
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState<Page>("Overview");
   const [market, setMarket] = useState<Market>("USA");
   const [clinicTimezone, setClinicTimezone] = useState("America/Chicago");
-  const [displayTimezone, setDisplayTimezone] = useState("America/Los_Angeles");
+  const [displayTimezone, setDisplayTimezone] = useState(viewerZone);
   const [showBooking, setShowBooking] = useState(false);
   const [showWaitlist, setShowWaitlist] = useState(false);
-  const [showCallDemo, setShowCallDemo] = useState(false);
   const [moving, setMoving] = useState<Appointment | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
-  const [demoCalls, setDemoCalls] = useState<DemoCallsInfo | undefined>(undefined);
-  // After a real demo call is requested, poll faster so changes made by the voice agent appear quickly.
-  const [fastPollUntil, setFastPollUntil] = useState(0);
   const [search, setSearch] = useState("");
-  const now = useNow();
+  const now = useNow(30_000);
+  // The server runs the simulated reminder job when it reads; running it again on this clock keeps the message log
+  // current between polls (and "unchanged" conditional reads correct).
+  const state = useMemo(() => (demo.state ? processDueMessages(demo.state, now).state : null), [demo.state, now]);
+  const names = useMemo(() => (state ? patientNames(state) : []), [state]);
 
-  // Poll results that arrive after a newer save are ignored. A save's own response is always applied: it is the
-  // server's answer to this user's action, even if the stored revision was ever reset.
-  const accept = useCallback((next: DemoSnapshot, fromAction = false) => {
-    if (!fromAction && next.revision < revisionRef.current && backendRef.current?.kind === "cloud") return;
-    revisionRef.current = next.revision;
-    setSnapshot(next);
-  }, []);
-
-  const startLocal = useCallback(async (reason: string) => {
-    const local = createLocalBackend();
-    localRef.current = local;
-    backendRef.current = local;
-    revisionRef.current = 0;
-    accept(await local.load());
-    setFallbackReason(reason);
-    setConnection(reason ? "fallback" : "local");
-  }, [accept]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!apiBaseUrl) { await startLocal(""); return; }
-      try {
-        const health = await getHealth();
-        if (!health.databaseConnected) throw new ApiRequestError(503, "database_unavailable", "The cloud demo database is not reachable.");
-        if ((health.apiVersion ?? 1) < requiredApiVersion) throw new ApiRequestError(409, "api_outdated", "The cloud API is older than this website.");
-        const loaded = await cloudBackend.load();
-        if (cancelled) return;
-        backendRef.current = cloudBackend;
-        accept(loaded);
-        setDemoCalls(health.demoCalls);
-        setConnection("cloud");
-      } catch (error) {
-        if (cancelled) return;
-        const reason = error instanceof ApiRequestError && error.code === "api_outdated"
-          ? "The cloud API has not been updated yet, so this browser is using its own private copy."
-          : "The cloud demo is unavailable, so this browser is using its own private copy.";
-        await startLocal(reason);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [accept, startLocal]);
-
-  const refresh = useCallback(async () => {
-    const backend = backendRef.current;
-    if (!backend) return;
-    try { accept(await backend.load()); } catch { /* keep the last good copy; the next poll retries */ }
-  }, [accept]);
-
-  // Keep the shared schedule fresh (for example after a voice booking), and run the local reminder simulation.
-  useEffect(() => {
-    if (connection === "connecting") return;
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== "visible") return;
-      if (connection === "cloud") void refresh();
-      else { const ticked = localRef.current?.tick(); if (ticked) accept(ticked); }
-    }, connection !== "cloud" ? 60_000 : fastPollUntil > Date.now() ? 8_000 : 30_000);
-    const onVisible = () => { if (document.visibilityState === "visible" && connection === "cloud") void refresh(); };
-    document.addEventListener("visibilitychange", onVisible);
-    // Drop back to the normal interval once the fast window ends.
-    const slowDown = fastPollUntil > Date.now() ? window.setTimeout(() => setFastPollUntil(0), fastPollUntil - Date.now()) : undefined;
-    return () => { window.clearInterval(timer); window.clearTimeout(slowDown); document.removeEventListener("visibilitychange", onVisible); };
-  }, [connection, refresh, accept, fastPollUntil]);
+  // Arriving from the call page: the heading takes focus once this (lazily loaded) screen is on the page.
+  useEffect(() => { takeHeadingFocus(); }, []);
 
   useEffect(() => {
     if (!toast) return;
@@ -177,13 +124,11 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  const performAction = demo.perform;
   const perform: Perform = useCallback(async (action, key = newIdempotencyKey()) => {
-    const backend = backendRef.current;
-    if (!backend) return false;
     setBusy(true);
     try {
-      const response = await backend.perform(action, key);
-      accept(response, true);
+      const response = await performAction(action, key);
       setToast({ tone: "success", text: response.result.appointment && action.type === "book_appointment"
         ? `Appointment confirmed · ${response.result.appointment.reference}`
         : response.result.message });
@@ -191,14 +136,12 @@ function App() {
     } catch (error) {
       const message = error instanceof ApiRequestError ? error.message : "The demo could not complete that request. Nothing was changed.";
       setToast({ tone: "error", text: message });
-      if (error instanceof ApiRequestError && (error.uncertain || error.status === 409)) void refresh();
       return false;
     } finally {
       setBusy(false);
     }
-  }, [accept, refresh]);
+  }, [performAction]);
 
-  const state = snapshot?.state;
   const openTasks = useMemo(() => state?.tasks.filter((task) => task.status !== "Done") ?? [], [state]);
 
   function changeMarket(nextMarket: Market) {
@@ -214,24 +157,34 @@ function App() {
     if (action === "attended" || action === "missed") await perform({ type: "record_attendance", reference: appointment.reference, outcome: action });
   }
 
-  function simulateCall(intent: CallIntent) {
-    setShowCallDemo(false);
-    if (intent === "appointment") { setShowBooking(true); return; }
-    if (intent === "waitlist") { setShowWaitlist(true); return; }
-    if (intent === "faq") { setPage("FAQs"); setToast({ tone: "success", text: "Try a caller question. Unlisted questions go to staff." }); return; }
-    void perform({ type: "create_task", requestType: intent }).then((ok) => { if (ok) setPage("Follow-ups"); });
-  }
-
   async function resetDemo() {
-    const scope = connection === "cloud" ? "This changes the shared demo for every visitor." : "This resets this browser's private copy.";
-    if (!window.confirm(`Restore the original fictional clinic data? ${scope}`)) return;
+    const scope = connection === "cloud" ? "Your private demo goes back to the sample clinic; names and bookings from your calls are removed." : "This resets the copy kept in this browser.";
+    if (!window.confirm(`Reset your demo to the original sample data? ${scope}`)) return;
     if (await perform({ type: "reset_demo" })) setPage("Overview");
   }
 
+  async function deleteData() {
+    if (callBusy) { setToast({ tone: "error", text: "A call is still running. End it first, then delete your demo data." }); return; }
+    if (!window.confirm(connection === "cloud" ? "Delete your private demo now? Names and bookings from your calls are removed and a fresh sample clinic starts." : "Delete the demo copy kept in this browser?")) return;
+    setBusy(true);
+    try {
+      await demo.forget();
+      dismissCall();
+      setToast({ tone: "success", text: "Your demo data was deleted. A fresh sample clinic is ready." });
+      setPage("Overview");
+    } catch (error) {
+      setToast({ tone: "error", text: error instanceof ApiRequestError && error.code === "call_in_progress" ? "A call is still running for your demo. Try again once it has ended." : "Your demo data couldn't be deleted just now. Please try again." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const pageTitle = page === "Overview" ? greeting(clinicTimezone, now) : page;
-  const callsOn = connection === "cloud" && Boolean(demoCalls?.enabled);
-  const indicator = connection === "connecting" ? "CONNECTING…" : connection === "cloud" ? (callsOn ? "SHARED CLOUD DEMO · CALL-ME ON" : "SHARED CLOUD DEMO · CALLS OFF") : connection === "fallback" ? "PRIVATE COPY · CLOUD UNAVAILABLE" : "LOCAL DEMO · CALLS OFF";
-  const assistantNote = connection === "cloud" ? (callsOn ? "Ask for a real AI call, or try a walkthrough. Texts are simulated." : "Shared cloud demo. No calls or texts are sent.") : connection === "connecting" ? "Connecting to the demo…" : "Private browser copy. No calls or texts are sent.";
+  const callsOn = connection === "cloud" && Boolean(demo.demoCalls?.enabled);
+  const indicator = connection === "connecting" ? "CONNECTING…" : connection === "cloud" ? "PRIVATE DEMO · ONLY YOU SEE THIS" : "BROWSER-ONLY COPY";
+  const assistantNote = connection === "cloud"
+    ? (callsOn ? "Call Ava by phone or in your browser. Her changes show up here." : "Live calls are off right now. Texts are always simulated.")
+    : connection === "connecting" ? "Connecting to the demo…" : "Browser-only copy. Calls are off; texts are simulated.";
 
   return (
     <div className="app-shell">
@@ -258,17 +211,18 @@ function App() {
         </nav>
         <div className="sidebar-bottom">
           <div className="assistant-card">
-            <div className="assistant-card-top"><span className="online-dot" />AI receptionist <span className="mock-tag">{callsOn ? "LIVE CALL" : "MOCK"}</span></div>
+            <div className="assistant-card-top"><span className="online-dot" />AI receptionist <span className="mock-tag">{callsOn ? "LIVE" : "OFF"}</span></div>
             <p>{assistantNote}</p>
-            <button className="assistant-link" onClick={() => setShowCallDemo(true)} disabled={!state}>{callsOn ? "Get a call or try it here" : "Try a sample call"} <span>↗</span></button>
+            <a className="assistant-link" href={routeHref.call}>Talk to the AI <span>↗</span></a>
           </div>
-          <div className="user-profile"><Avatar name="Owner" /><span><strong>Demo workspace</strong><small>Administrator</small></span><button className="more-button" aria-label="Profile options">···</button></div>
+          <div className="user-profile"><Avatar name="Owner" /><span><strong>Your private demo</strong><small>Front desk view</small></span><button className="more-button" aria-label="Demo settings" onClick={() => setPage("Settings")}>···</button></div>
         </div>
       </aside>
 
       <main className="main-area">
+        <CallStatusBar />
         <header className="topbar">
-          <div className="breadcrumb"><span>Harbor Health</span><span className="crumb-divider">/</span><strong>{page}</strong></div>
+          <div className="breadcrumb"><a className="crumb-home" href={routeHref.call}>CareDesk demo</a><span className="crumb-divider">/</span><span>Harbor Health</span><span className="crumb-divider">/</span><strong>{page}</strong></div>
           <div className="topbar-actions">
             <span className={`demo-indicator ${connection === "fallback" ? "demo-indicator-warning" : ""}`} role="status"><span className="online-dot" />{busy ? "SAVING…" : indicator}</span>
             <Avatar name="Owner" size="small" />
@@ -279,17 +233,17 @@ function App() {
           <div className="page-heading-row">
             <div>
               <div className="eyebrow">{new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric", timeZone: clinicTimezone }).format(new Date(now)).toUpperCase()} <span>·</span> {timezoneLabel(clinicTimezone)} <span>·</span> {isClinicOpen(clinicTimezone, now) ? "OPEN NOW" : "CLOSED NOW"}</div>
-              <h1>{pageTitle}</h1>
+              <h1 id="page-heading" tabIndex={-1}>{pageTitle}</h1>
               <p className="page-subtitle">{pageDescriptions[page]}</p>
             </div>
             <div className="heading-actions">
-              <button className="button button-secondary" onClick={() => setShowCallDemo(true)} disabled={!state}><span className="button-icon">◉</span> {callsOn ? "Call me / simulate" : "Simulate a call"}</button>
+              <a className="button button-secondary" href={routeHref.call}><span className="button-icon">◉</span> Talk to the AI</a>
               {page === "Waitlist" && <button className="button button-secondary" onClick={() => setShowWaitlist(true)} disabled={!state}><span className="button-icon">↗</span> Join waitlist</button>}
               <button className="button button-primary" onClick={() => setShowBooking(true)} disabled={!state}><span className="button-icon">＋</span> New appointment</button>
             </div>
           </div>
 
-          {connection === "fallback" && <div className="banner banner-safety connection-banner"><span className="banner-icon">!</span><div><strong>Using a private copy</strong><span>{fallbackReason} Changes here are not shared and no calls or texts are sent.</span></div></div>}
+          {connection === "fallback" && <div className="banner banner-safety connection-banner"><span className="banner-icon">!</span><div><strong>Using a browser-only copy</strong><span>{fallbackReason} Changes stay in this browser, and calls are off.</span></div></div>}
 
           <section className="timezone-strip" aria-label="Market and timezone controls">
             <div className="market-control"><span className="control-icon">◎</span><label htmlFor="market-select">Market</label>
@@ -306,46 +260,45 @@ function App() {
             <div className="control-divider" />
             <div className="market-control"><span className="control-icon">◉</span><label htmlFor="display-timezone">My display time</label>
               <select id="display-timezone" value={displayTimezone} onChange={(event) => setDisplayTimezone(event.target.value)}>
-                {allTimezones.map((zone) => <option key={zone} value={zone}>{timezoneLabel(zone)}</option>)}
+                {displayZones(viewerZone).map((zone) => <option key={zone} value={zone}>{timezoneLabel(zone)}</option>)}
               </select>
             </div>
             <span className="english-tag">ENGLISH</span>
           </section>
 
-          {!state && <section className="card loading-card" aria-busy="true"><div className="empty-state"><span>◌</span><strong>Loading the sample clinic…</strong><p>Fetching fictional appointments, tasks, and messages.</p></div></section>}
+          {!state && <section className="card loading-card" aria-busy="true"><div className="empty-state"><span>◌</span><strong>Loading your demo clinic…</strong><p>Fetching fictional appointments, tasks, and messages.</p></div></section>}
           {state && <>
-            {page === "Overview" && <Overview state={state} now={now} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} callsOn={callsOn} onPage={setPage} onTask={(id) => void perform({ type: "update_task", taskId: id, status: "Done" })} onCall={() => setShowCallDemo(true)} busy={busy} />}
+            {page === "Overview" && <Overview state={state} now={now} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} callsOn={callsOn} onPage={setPage} onTask={(id) => void perform({ type: "update_task", taskId: id, status: "Done" })} busy={busy} />}
             {page === "Appointments" && <Appointments state={state} now={now} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} busy={busy} onChange={changeAppointment} onMove={setMoving} onBook={() => setShowBooking(true)} />}
             {page === "Waitlist" && <Waitlist entries={state.waitlist} busy={busy} onCancel={(id) => void perform({ type: "cancel_waitlist", waitlistId: id })} />}
             {page === "Referrals" && <Referrals state={state} clinicTimezone={clinicTimezone} busy={busy} onMark={(id) => void perform({ type: "mark_document_received", documentId: id })} />}
             {page === "Follow-ups" && <FollowUps tasks={state.tasks} clinicTimezone={clinicTimezone} busy={busy} onUpdate={(id, status) => void perform({ type: "update_task", taskId: id, status })} />}
-            {page === "Messages" && <Messages state={state} clinicTimezone={clinicTimezone} busy={busy} onPreference={(patient, optedOut) => void perform({ type: "set_sms_preference", patient, optedOut })} />}
+            {page === "Messages" && <Messages state={state} names={names} clinicTimezone={clinicTimezone} busy={busy} onPreference={(patient, optedOut) => void perform({ type: "set_sms_preference", patient, optedOut })} />}
             {page === "FAQs" && <Faqs search={search} onSearch={setSearch} busy={busy} onAskStaff={() => void perform({ type: "create_task", requestType: "faq_review" })} onCreateTask={(requestType) => void perform({ type: "create_task", requestType })} />}
-            {page === "Settings" && <Settings market={market} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} connection={connection} demoCalls={callsOn ? demoCalls : undefined} busy={busy} onReset={resetDemo} />}
+            {page === "Settings" && <Settings market={market} clinicTimezone={clinicTimezone} displayTimezone={displayTimezone} connection={connection} demoCalls={callsOn ? demo.demoCalls : undefined} retentionDays={demo.retentionDays} memoryOnly={demo.memoryOnly} busy={busy} onReset={resetDemo} onDelete={deleteData} />}
           </>}
 
-          <div className="footer-note"><span className="shield-icon">◇</span><span>Fictional demo · Use sample data only · Not for medical advice or real patient information</span><button onClick={() => setPage("Settings")}>Demo settings</button></div>
+          <div className="footer-note"><span className="shield-icon">◇</span><span>Fictional demo · Use made-up details only · Not for medical advice or real patient information</span><button onClick={() => setPage("Settings")}>Demo settings</button></div>
         </div>
       </main>
 
-      {showBooking && backendRef.current && <SlotModal mode="book" backend={backendRef.current} clinicTimezone={clinicTimezone} onClose={() => setShowBooking(false)}
+      {showBooking && backend && <SlotModal mode="book" names={names} backend={backend} clinicTimezone={clinicTimezone} onClose={() => setShowBooking(false)}
         onSubmit={async ({ patient, appointmentType, slot, key }) => {
           const ok = await perform({ type: "book_appointment", patient, appointmentType, startAt: slot.startAt, timezone: slot.timezone, provider: slot.provider }, key);
           if (ok) { setShowBooking(false); setPage("Appointments"); }
           return ok;
         }} />}
-      {moving && backendRef.current && <SlotModal mode="move" appointment={moving} backend={backendRef.current} clinicTimezone={moving.timezone || clinicTimezone} onClose={() => setMoving(null)}
+      {moving && backend && <SlotModal mode="move" names={names} appointment={moving} backend={backend} clinicTimezone={moving.timezone || clinicTimezone} onClose={() => setMoving(null)}
         onSubmit={async ({ slot, key }) => {
           const ok = await perform({ type: "reschedule_appointment", reference: moving.reference, patient: moving.patient, newStartAt: slot.startAt, timezone: slot.timezone, provider: slot.provider }, key);
           if (ok) setMoving(null);
           return ok;
         }} />}
-      {showWaitlist && <WaitlistModal clinicTimezone={clinicTimezone} busy={busy} onClose={() => setShowWaitlist(false)}
+      {showWaitlist && <WaitlistModal names={names} clinicTimezone={clinicTimezone} busy={busy} onClose={() => setShowWaitlist(false)}
         onSubmit={async (action, key) => {
           const ok = await perform(action, key);
           if (ok) { setShowWaitlist(false); setPage("Waitlist"); }
         }} />}
-      {showCallDemo && <CallDemoModal demoCalls={demoCalls} cloud={connection === "cloud"} onCallPlaced={() => setFastPollUntil(Date.now() + 8 * 60_000)} onClose={() => setShowCallDemo(false)} onSelect={simulateCall} />}
       {toast && <div className={`toast ${toast.tone === "error" ? "toast-error" : ""}`} role={toast.tone === "error" ? "alert" : "status"}><span>{toast.tone === "error" ? "!" : "✓"}</span>{toast.text}</div>}
     </div>
   );
@@ -363,9 +316,9 @@ const activityIcons: Partial<Record<ActivityEvent["action"], [string, string]>> 
   "Text reminders turned off": ["⊘", "orange"], "Text reminders turned on": ["◌", "green"], "Sample data reset": ["↺", "blue"],
 };
 
-function Overview({ state, now, clinicTimezone, displayTimezone, callsOn, onPage, onTask, onCall, busy }: {
+function Overview({ state, now, clinicTimezone, displayTimezone, callsOn, onPage, onTask, busy }: {
   state: DemoState; now: number; clinicTimezone: string; displayTimezone: string; callsOn: boolean; onPage: (page: Page) => void;
-  onTask: (id: string) => void; onCall: () => void; busy: boolean;
+  onTask: (id: string) => void; busy: boolean;
 }) {
   const today = todayKey(clinicTimezone, now);
   const todays = state.appointments.filter((item) => item.status !== "Cancelled" && todayKey(clinicTimezone, Date.parse(item.startAt)) === today);
@@ -412,16 +365,16 @@ function Overview({ state, now, clinicTimezone, displayTimezone, callsOn, onPage
         <div className="activity-list">
           {events.map((event) => {
             const [icon, color] = activityIcons[event.action] ?? ["•", "blue"];
-            return <Activity key={event.id} icon={icon} color={color} title={event.action} detail={[event.patient, event.reference, event.channel].filter(Boolean).join(" · ")} time={formatShort(event.at, displayTimezone)} />;
+            return <Activity key={event.id} icon={icon} color={color} title={event.action} detail={[event.patient, event.reference, event.channel].filter(Boolean).join(" · ")} time={formatShort(event.at, displayTimezone)} fromCall={fromRecentCall(event, now)} />;
           })}
           {events.length === 0 && <EmptyState title="No activity yet" text="Bookings, changes, and staff requests will appear here." />}
         </div>
       </section>
       <section className="card assistant-summary-card">
-        <div className="summary-top"><div className="summary-icon">✦</div><div><span className="summary-overline">AI FRONT DESK</span><h2>Ready to help, safely.</h2></div><StatusPill tone={callsOn ? "green" : "blue"}>{callsOn ? "Live calls on" : "Mock mode"}</StatusPill></div>
-        <p>The assistant can answer approved admin questions, help with sample appointments, and route requests to staff.</p>
-        <div className="summary-safety"><span>✓</span><span>{callsOn ? "Clinical questions go to a person. Calls happen only when you request one; texts are simulated." : "Clinical questions go to a person. No calls or texts are sent in this demo."}</span></div>
-        <button className="button button-secondary full-button" onClick={onCall}>{callsOn ? "Get a real AI call" : "Explore a sample call"} <span>→</span></button>
+        <div className="summary-top"><div className="summary-icon">✦</div><div><span className="summary-overline">AI FRONT DESK</span><h2>Ava answers the phone.</h2></div><StatusPill tone={callsOn ? "green" : "blue"}>{callsOn ? "Live calls on" : "Calls off"}</StatusPill></div>
+        <p>Call Ava, the AI receptionist, by phone or in your browser. She answers approved admin questions, books and changes visits, and routes requests to staff — and her changes appear here.</p>
+        <div className="summary-safety"><span>✓</span><span>Clinical questions go to a person. Calls happen only when you ask for one; texts are always simulated.</span></div>
+        <a className="button button-secondary full-button" href={routeHref.call}>Talk to the AI <span>→</span></a>
       </section>
     </div>
   </>;
@@ -431,8 +384,8 @@ function StatCard({ label, value, note, icon, color }: { label: string; value: s
   return <div className="stat-card"><div className={`stat-icon stat-${color}`}>{icon}</div><div className="stat-label">{label}</div><div className="stat-value">{value}</div><div className="stat-note">{note}</div></div>;
 }
 
-function Activity({ icon, color, title, detail, time }: { icon: string; color: string; title: string; detail: string; time: string }) {
-  return <div className="activity-item"><span className={`activity-icon activity-${color}`}>{icon}</span><div className="activity-copy"><strong>{title}</strong><span>{detail}</span></div><span className="activity-time">{time}</span></div>;
+function Activity({ icon, color, title, detail, time, fromCall = false }: { icon: string; color: string; title: string; detail: string; time: string; fromCall?: boolean }) {
+  return <div className="activity-item"><span className={`activity-icon activity-${color}`}>{icon}</span><div className="activity-copy"><strong>{title}{fromCall && <span className="from-call-tag">From your call</span>}</strong><span>{detail}</span></div><span className="activity-time">{time}</span></div>;
 }
 
 function AppointmentRow({ appointment, clinicTimezone, displayTimezone, compact = false }: { appointment: Appointment; clinicTimezone: string; displayTimezone: string; compact?: boolean }) {
@@ -485,7 +438,7 @@ function Appointments({ state, now, clinicTimezone, displayTimezone, busy, onCha
     <div className="table-foot"><span>{visible.length} of {appointments.length} sample appointments</span><span>Stored as UTC · shown in clinic and viewer time</span></div>
   </section>
   <section className="card full-card"><div className="card-heading"><div><h2>Change history</h2><p>Who changed which sample booking, and through which channel.</p></div></div>
-    <div className="activity-list history-list">{history.map((event) => <Activity key={event.id} icon={activityIcons[event.action]?.[0] ?? "•"} color={activityIcons[event.action]?.[1] ?? "blue"} title={`${event.action} · ${event.reference}`} detail={`${event.patient ?? ""} · ${event.channel}`} time={formatShort(event.at, displayTimezone)} />)}
+    <div className="activity-list history-list">{history.map((event) => <Activity key={event.id} icon={activityIcons[event.action]?.[0] ?? "•"} color={activityIcons[event.action]?.[1] ?? "blue"} title={`${event.action} · ${event.reference}`} detail={`${event.patient ?? ""} · ${event.channel}`} time={formatShort(event.at, displayTimezone)} fromCall={fromRecentCall(event, now)} />)}
       {history.length === 0 && <EmptyState title="No changes recorded yet" text="Bookings, moves, cancellations, and visit outcomes appear here." />}</div>
   </section></div>;
 }
@@ -524,7 +477,7 @@ function FollowUps({ tasks, clinicTimezone, busy, onUpdate }: { tasks: FollowUpT
   const sorted = [...tasks].sort((a, b) => (a.status === "Done" ? 1 : 0) - (b.status === "Done" ? 1 : 0) || a.dueAt.localeCompare(b.dueAt));
   return <section className="card full-card"><div className="card-heading"><div><h2>Staff follow-up queue</h2><p>Requests that need a person to close the loop. Caller wording is never stored.</p></div><StatusPill tone="amber">{`${tasks.filter((task) => task.status !== "Done").length} open`}</StatusPill></div>
     <div className="task-list">{sorted.map((task) => <div className={`task-row ${task.status === "Done" ? "task-complete" : ""}`} key={task.id}><span className={`task-priority priority-${taskTone(task.priority)}`}>{task.priority === "Urgent" ? "!" : "◷"}</span><div className="task-body"><div className="task-title-line"><strong>{task.title}</strong><StatusPill tone={task.status === "Done" ? "green" : taskTone(task.priority)}>{task.status === "Done" ? "Done" : task.priority}</StatusPill></div><span>{task.patient}{task.appointmentReference ? ` · ${task.appointmentReference}` : ""} · {task.detail}</span></div><div className="task-due">Due <strong>{formatDateTime(task.dueAt, clinicTimezone)}</strong></div><select aria-label={`Update ${task.title}`} value={task.status} disabled={busy} onChange={(event) => onUpdate(task.id, event.target.value as FollowUpTask["status"])}><option>Open</option><option>In progress</option><option>Done</option></select></div>)}
-      {tasks.length === 0 && <EmptyState title="No follow-ups" text="Simulate a call to add a staff request." />}</div>
+      {tasks.length === 0 && <EmptyState title="No follow-ups" text="Call the AI and ask for a callback to add a staff request." />}</div>
   </section>;
 }
 
@@ -535,10 +488,10 @@ function messageTone(status: string): "green" | "neutral" | "amber" | "red" {
   return "amber";
 }
 
-function Messages({ state, clinicTimezone, busy, onPreference }: { state: DemoState; clinicTimezone: string; busy: boolean; onPreference: (patient: string, optedOut: boolean) => void }) {
+function Messages({ state, names, clinicTimezone, busy, onPreference }: { state: DemoState; names: string[]; clinicTimezone: string; busy: boolean; onPreference: (patient: string, optedOut: boolean) => void }) {
   return <div className="stack-layout"><div className="banner banner-demo"><span className="banner-icon">◌</span><div><strong>SMS simulation only</strong><span>These are sample messages saved with demo data. The app does not send real texts. Simulated texts wait for 9 AM–8 PM clinic time.</span></div><StatusPill tone="blue">Live texting off</StatusPill></div>
     <section className="card full-card"><div className="card-heading"><div><h2>Text preferences</h2><p>Simulate a patient replying STOP or START. Opted-out patients get no reminders.</p></div></div>
-      <div className="preference-list">{demoPatients.map((patient) => {
+      <div className="preference-list">{names.map((patient) => {
         const optedOut = isOptedOut(state, patient);
         return <div className="preference-row" key={patient}><Avatar name={patient} size="small" /><strong>{patient}</strong><StatusPill tone={optedOut ? "red" : "green"}>{optedOut ? "Opted out" : "Texts allowed"}</StatusPill><button className="row-text-action" disabled={busy} onClick={() => onPreference(patient, !optedOut)}>{optedOut ? "Simulate START" : "Simulate STOP"}</button></div>;
       })}</div>
@@ -576,28 +529,38 @@ function Faqs({ search, onSearch, busy, onAskStaff, onCreateTask }: { search: st
   </div>;
 }
 
-function Settings({ market, clinicTimezone, displayTimezone, connection, demoCalls, busy, onReset }: { market: Market; clinicTimezone: string; displayTimezone: string; connection: Connection; demoCalls?: DemoCallsInfo; busy: boolean; onReset: () => void }) {
+function Settings({ market, clinicTimezone, displayTimezone, connection, demoCalls, retentionDays, memoryOnly, busy, onReset, onDelete }: {
+  market: Market; clinicTimezone: string; displayTimezone: string; connection: Connection; demoCalls?: DemoCallsInfo; retentionDays: number; memoryOnly: boolean;
+  busy: boolean; onReset: () => void; onDelete: () => void;
+}) {
   const [showBoundaries, setShowBoundaries] = useState(false);
-  return <div className="settings-grid"><section className="card settings-card"><div className="card-heading"><div><h2>Clinic profile</h2><p>Fictional settings for this demo.</p></div><StatusPill tone="blue">Demo only</StatusPill></div><div className="setting-line"><span>Market</span><strong>{market}</strong></div><div className="setting-line"><span>Clinic scheduling timezone</span><strong>{timezoneLabel(clinicTimezone)}</strong></div><div className="setting-line"><span>My display timezone</span><strong>{timezoneLabel(displayTimezone)}</strong></div><div className="setting-line"><span>Language</span><strong>English</strong></div><div className="setting-line"><span>Opening hours</span><strong>Mon–Fri · 8 AM–5 PM</strong></div><div className="setting-line"><span>Reminder plan</span><strong>Confirmation · 24h · 48h docs follow-up</strong></div><div className="setting-line"><span>Text quiet hours</span><strong>Outside 9 AM–8 PM clinic time</strong></div><div className="setting-line"><span>Data</span><strong>{connection === "cloud" ? "Shared cloud demo" : "This browser only"}</strong></div></section>
-      <section className="card settings-card"><div className="card-heading"><div><h2>Phone & messaging</h2><p>{demoCalls?.enabled ? "Visitors can request one AI demo call. Texts stay simulated." : "No live voice or messaging connection is enabled for this demo."}</p></div><span className="mock-tag">{demoCalls?.enabled ? "LIVE CALL" : "MOCK"}</span></div><div className="integration-item"><span className="integration-logo retell-logo">R</span><div><strong>Voice assistant</strong><small>{demoCalls?.enabled ? `Retell · calls from ${demoCalls.fromNumber} · up to ${demoCalls.maxMinutes} min · US & India` : "Retell agent · calls are not switched on"}</small></div><StatusPill tone={demoCalls?.enabled ? "green" : "blue"}>{demoCalls?.enabled ? "Call-me on" : "Not connected"}</StatusPill></div><div className="integration-item"><span className="integration-logo sms-logo">↗</span><div><strong>SMS reminders</strong><small>Provider chosen after the first market pilot</small></div><StatusPill tone="blue">Not connected</StatusPill></div><div className="allowlist-box"><span>◉</span><div><strong>Call limits</strong><small>{demoCalls?.enabled ? `At most ${demoCalls.maxCallsPerDay} visitor calls a day, with a cooldown per number, after consent and a security check. The owner's test number is exempt.` : "No real calls are placed and no texts are sent."}</small></div></div></section>
-      <section className="card settings-card privacy-card"><div className="privacy-icon">◇</div><div><h2>Keep the demo safe</h2><p>Use fictional names and sample data only. Do not enter real health details or upload patient records. Clinical requests go to a person.</p><button className="text-button" onClick={() => setShowBoundaries((value) => !value)} aria-expanded={showBoundaries}>{showBoundaries ? "Hide demo boundaries" : "View demo boundaries"} <span>→</span></button>{showBoundaries && <ul className="boundary-list"><li>This is a fictional front desk demo. It does not provide medical care, triage, or advice.</li><li>No calls or texts are sent; reminders are simulated records.</li><li>Only built-in sample names and DEMO references are accepted, and caller wording is never stored.</li><li>Not represented as HIPAA, GDPR, or UAE health-data compliant.</li></ul>}</div></section>
-      <section className="card settings-card reset-card"><div><h2>Reset this demo</h2><p>Restore the original fictional data. {connection === "cloud" ? "This affects everyone using the shared demo." : "This resets the copy in this browser."}</p></div><button className="button button-secondary" disabled={busy} onClick={onReset}>Reset sample data</button></section>
+  const cloud = connection === "cloud";
+  const callsOn = Boolean(demoCalls?.enabled);
+  const webOn = callsOn && demoCalls?.web?.enabled !== false;
+  const dataLine = cloud
+    ? (memoryOnly ? "Your private demo · ends when this tab closes" : `Your private demo · deleted ${retentionDays} days after last use`)
+    : "This browser only";
+  return <div className="settings-grid"><section className="card settings-card"><div className="card-heading"><div><h2>Clinic profile</h2><p>Fictional settings for this demo.</p></div><StatusPill tone="blue">Demo only</StatusPill></div><div className="setting-line"><span>Market</span><strong>{market}</strong></div><div className="setting-line"><span>Clinic scheduling timezone</span><strong>{timezoneLabel(clinicTimezone)}</strong></div><div className="setting-line"><span>My display timezone</span><strong>{timezoneLabel(displayTimezone)}</strong></div><div className="setting-line"><span>Language</span><strong>English</strong></div><div className="setting-line"><span>Opening hours</span><strong>Mon–Fri · 8 AM–5 PM</strong></div><div className="setting-line"><span>Reminder plan</span><strong>Confirmation · 24h · 48h docs follow-up</strong></div><div className="setting-line"><span>Text quiet hours</span><strong>Outside 9 AM–8 PM clinic time</strong></div><div className="setting-line"><span>Data</span><strong>{dataLine}</strong></div></section>
+      <section className="card settings-card"><div className="card-heading"><div><h2>Phone & messaging</h2><p>{callsOn ? "Visitors can call Ava, the AI receptionist, by phone or in the browser. Texts stay simulated." : "Live calls are off for this demo right now. Texts are always simulated."}</p></div><span className="mock-tag">{callsOn ? "LIVE CALLS" : "CALLS OFF"}</span></div><div className="integration-item"><span className="integration-logo retell-logo">R</span><div><strong>Phone calls</strong><small>{callsOn ? `Retell · calls from ${demoCalls?.fromNumber} · up to ${demoCalls?.maxMinutes} min · US & India` : "Retell agent · calls are not switched on"}</small></div><StatusPill tone={callsOn ? "green" : "blue"}>{callsOn ? "On" : "Off"}</StatusPill></div><div className="integration-item"><span className="integration-logo retell-logo">◉</span><div><strong>Browser calls</strong><small>{webOn ? "Talk to Ava with your microphone, from any country" : "Switched off"}</small></div><StatusPill tone={webOn ? "green" : "blue"}>{webOn ? "On" : "Off"}</StatusPill></div><div className="integration-item"><span className="integration-logo sms-logo">↗</span><div><strong>SMS reminders</strong><small>Provider chosen after the first market pilot</small></div><StatusPill tone="blue">Not connected</StatusPill></div><div className="allowlist-box"><span>◉</span><div><strong>Call limits</strong><small>{callsOn ? `At most ${demoCalls?.maxCallsPerDay} demo calls a day across all visitors (phone and browser together), 3 per connection in any 24 hours, with a cooldown per phone number, after consent and a security check.` : "No calls are placed and no texts are sent."}</small></div></div><a className="text-button settings-call-link" href={routeHref.call}>Talk to the AI <span>→</span></a></section>
+      <section className="card settings-card privacy-card"><div className="privacy-icon">◇</div><div><h2>Keep the demo safe</h2><p>Use made-up names and details only. Do not enter real health details or upload patient records. Clinical requests go to a person.</p><button className="text-button" onClick={() => setShowBoundaries((value) => !value)} aria-expanded={showBoundaries}>{showBoundaries ? "Hide demo boundaries" : "View demo boundaries"} <span>→</span></button>{showBoundaries && <ul className="boundary-list"><li>This is a fictional front desk demo. It does not provide medical care, triage, or advice.</li><li>Calls happen only when you ask for one. Texts are never sent; reminders are simulated records.</li><li>{cloud ? `Your demo is private to this browser: names come from the sample patients or from your own calls, and nobody else sees them. It is deleted ${retentionDays} days after last use.` : "This copy lives only in this browser. Names come from the sample patients."} Caller wording is never stored.</li><li>Your phone number is never stored. Retell processes call audio; this demo is set to keep no recordings or transcripts.</li><li>Not represented as HIPAA, GDPR, or UAE health-data compliant.</li></ul>}</div></section>
+      <section className="card settings-card reset-card"><div><h2>Reset my demo</h2><p>{cloud ? "Put your private demo back to the original sample clinic. Names and bookings from your calls are removed." : "Put the copy in this browser back to the original sample clinic."}</p></div><button className="button button-secondary" disabled={busy} onClick={onReset}>Reset my demo</button></section>
+      <section className="card settings-card reset-card"><div><h2>Delete my demo data</h2><p>{cloud ? "Remove your private demo now instead of waiting for the automatic deletion. A fresh sample clinic starts." : "Remove the demo copy kept in this browser."}</p></div><button className="button button-secondary button-danger" disabled={busy || connection === "connecting"} onClick={onDelete}>Delete my demo data</button></section>
     </div>;
 }
 
-function Modal({ labelledBy, onClose, children, wide = false }: { labelledBy: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+function Modal({ labelledBy, onClose, children }: { labelledBy: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className={`modal-card ${wide ? "call-modal" : ""}`} role="dialog" aria-modal="true" aria-labelledby={labelledBy}>{children}</section></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby={labelledBy}>{children}</section></div>;
 }
 
 interface SlotSubmission { patient: string; appointmentType: string; slot: AvailabilitySlot; key: string }
 
-function SlotModal({ mode, appointment, backend, clinicTimezone, onClose, onSubmit }: {
-  mode: "book" | "move"; appointment?: Appointment; backend: DemoBackend; clinicTimezone: string;
+function SlotModal({ mode, names, appointment, backend, clinicTimezone, onClose, onSubmit }: {
+  mode: "book" | "move"; names: string[]; appointment?: Appointment; backend: DemoBackend; clinicTimezone: string;
   onClose: () => void; onSubmit: (submission: SlotSubmission) => Promise<boolean>;
 }) {
   const [patient, setPatient] = useState(appointment?.patient ?? "");
@@ -624,7 +587,7 @@ function SlotModal({ mode, appointment, backend, clinicTimezone, onClose, onSubm
   const slot = slots?.find((item) => item.startAt === selected);
   const title = mode === "book" ? "Book an appointment" : `Move ${appointment?.reference}`;
   return <Modal labelledBy="slot-title" onClose={onClose}>
-    <div className="modal-header"><div><span className="modal-kicker">{mode === "book" ? "SAMPLE SCHEDULE" : "RESCHEDULE"}</span><h2 id="slot-title">{title}</h2><p>{mode === "book" ? "Pick a fictional patient and an open sample time." : `${appointment?.patient} · ${appointment?.type}. Currently ${appointment ? formatDateTime(appointment.startAt, clinicTimezone) : ""}.`}</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div>
+    <div className="modal-header"><div><span className="modal-kicker">{mode === "book" ? "SAMPLE SCHEDULE" : "RESCHEDULE"}</span><h2 id="slot-title">{title}</h2><p>{mode === "book" ? "Pick a sample patient (or a name from your calls) and an open time." : `${appointment?.patient} · ${appointment?.type}. Currently ${appointment ? formatDateTime(appointment.startAt, clinicTimezone) : ""}.`}</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div>
     <form onSubmit={async (event) => {
       event.preventDefault();
       if (!slot || !patient) return;
@@ -634,7 +597,7 @@ function SlotModal({ mode, appointment, backend, clinicTimezone, onClose, onSubm
       if (!ok) setReload((value) => value + 1);
     }}>
       {mode === "book" && <>
-        <label className="form-label">Fictional patient<select name="patient" required value={patient} onChange={(event) => setPatient(event.target.value)}><option value="" disabled>Choose sample patient</option>{demoPatients.map((name) => <option key={name}>{name}</option>)}</select></label>
+        <label className="form-label">Patient<select name="patient" required value={patient} onChange={(event) => setPatient(event.target.value)}><option value="" disabled>Choose a patient</option><PatientOptions names={names} /></select></label>
         <label className="form-label">Appointment type<select name="appointmentType" value={appointmentType} onChange={(event) => setAppointmentType(event.target.value)}>{appointmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
       </>}
       <label className="form-label">Date (clinic time)<input type="date" name="date" required min={todayKey(clinicTimezone)} value={date} onChange={(event) => { if (event.target.value) setDate(event.target.value); }} /></label>
@@ -650,15 +613,15 @@ function SlotModal({ mode, appointment, backend, clinicTimezone, onClose, onSubm
   </Modal>;
 }
 
-function WaitlistModal({ clinicTimezone, busy, onClose, onSubmit }: { clinicTimezone: string; busy: boolean; onClose: () => void; onSubmit: (action: DemoAction, key: string) => Promise<void> }) {
+function WaitlistModal({ names, clinicTimezone, busy, onClose, onSubmit }: { names: string[]; clinicTimezone: string; busy: boolean; onClose: () => void; onSubmit: (action: DemoAction, key: string) => Promise<void> }) {
   // Same request, same key; any edit to the form starts a new request.
   const keyRef = useRef(newIdempotencyKey());
-  return <Modal labelledBy="waitlist-title" onClose={onClose}><div className="modal-header"><div><span className="modal-kicker">SAMPLE WAITLIST</span><h2 id="waitlist-title">Add a waitlist request</h2><p>Use a fictional patient and preferred date.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><form onChange={() => { keyRef.current = newIdempotencyKey(); }} onSubmit={(event) => {
+  return <Modal labelledBy="waitlist-title" onClose={onClose}><div className="modal-header"><div><span className="modal-kicker">SAMPLE WAITLIST</span><h2 id="waitlist-title">Add a waitlist request</h2><p>Pick a sample patient (or a name from your calls) and a preferred date.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><form onChange={() => { keyRef.current = newIdempotencyKey(); }} onSubmit={(event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     void onSubmit({ type: "join_waitlist", patient: String(form.get("patient") || ""), appointmentType: String(form.get("appointmentType") || ""), preferredDate: String(form.get("preferredDate") || ""), timezone: clinicTimezone }, keyRef.current);
   }}>
-    <label className="form-label">Fictional patient<select name="patient" required defaultValue=""><option value="" disabled>Choose sample patient</option>{demoPatients.map((patient) => <option key={patient}>{patient}</option>)}</select></label>
+    <label className="form-label">Patient<select name="patient" required defaultValue=""><option value="" disabled>Choose a patient</option><PatientOptions names={names} /></select></label>
     <label className="form-label">Appointment type<select name="appointmentType">{appointmentTypes.map((type) => <option key={type}>{type}</option>)}</select></label>
     <label className="form-label">Preferred date (clinic time)<input type="date" name="preferredDate" required min={todayKey(clinicTimezone)} defaultValue={nextOpenDateKey(clinicTimezone)} /></label>
     <div className="timezone-hint"><span>◷</span> Preferred date uses clinic time: <strong>{timezoneLabel(clinicTimezone)}</strong></div>
@@ -667,19 +630,15 @@ function WaitlistModal({ clinicTimezone, busy, onClose, onSubmit }: { clinicTime
   </form></Modal>;
 }
 
-function CallDemoModal({ demoCalls, cloud, onCallPlaced, onClose, onSelect }: { demoCalls?: DemoCallsInfo; cloud: boolean; onCallPlaced: () => void; onClose: () => void; onSelect: (intent: CallIntent) => void }) {
-  const options: { id: CallIntent; icon: string; title: string; detail: string }[] = [
-    { id: "appointment", icon: "▦", title: "Book an appointment", detail: "Check open times and confirm a sample booking" },
-    { id: "waitlist", icon: "↗", title: "Join a waitlist", detail: "Ask staff to contact a sample patient about an opening" },
-    { id: "faq", icon: "?", title: "Ask a common question", detail: "Test the approved-answer lookup" },
-    { id: "callback", icon: "◉", title: "Ask for a person", detail: "Add a callback to the staff queue" },
-    { id: "accessibility", icon: "⊕", title: "Request an interpreter or access help", detail: "Add an accessibility request for staff" },
-    { id: "documents", icon: "▤", title: "Ask about a referral", detail: "Create a document follow-up task" },
-    { id: "refill", icon: "＋", title: "Request a prescription refill", detail: "Route it to staff without advice" },
-    { id: "records", icon: "▧", title: "Request medical records", detail: "Create an administrative task" },
-    { id: "billing", icon: "$", title: "Ask a billing question", detail: "Route the question to staff" },
-  ];
-  return <Modal labelledBy="call-title" onClose={onClose} wide><div className="modal-header"><div><span className="modal-kicker">TRY THE AI FRONT DESK</span><h2 id="call-title">What would you like to try?</h2><p>Get a real AI phone call, or pick a sample caller request below. The walkthrough updates demo data and makes no call or text.</p></div><button className="modal-close" onClick={onClose} aria-label="Close">×</button></div><CallMePanel info={demoCalls} cloud={cloud} onCallPlaced={onCallPlaced} /><div className="call-section-label">Or simulate a request without a call</div><div className="call-options">{options.map((option) => <button className="call-option" key={option.id} onClick={() => onSelect(option.id)}><span className="call-option-icon">{option.icon}</span><span><strong>{option.title}</strong><small>{option.detail}</small></span><span className="call-option-arrow">→</span></button>)}</div><div className="modal-disclaimer">Texts are always simulated. Everything uses fictional data only.</div></Modal>;
+/** Sample patients first, then names the visitor gave on their own calls. */
+function PatientOptions({ names }: { names: string[] }) {
+  const samples = names.slice(0, 5);
+  const callers = names.slice(5);
+  if (callers.length === 0) return <>{samples.map((name) => <option key={name}>{name}</option>)}</>;
+  return <>
+    <optgroup label="Sample patients">{samples.map((name) => <option key={name}>{name}</option>)}</optgroup>
+    <optgroup label="From your calls">{callers.map((name) => <option key={name}>{name}</option>)}</optgroup>
+  </>;
 }
 
 function EmptyState({ title, text }: { title: string; text: string }) {

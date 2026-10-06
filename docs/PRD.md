@@ -12,7 +12,7 @@ AI Healthcare Front Desk is a portfolio and demonstration system for a fictional
 
 It must not diagnose, recommend treatment, interpret symptoms, decide clinical urgency, or replace a clinician. Clinical questions and uncertain requests go to clinic staff. The first scheduler is a demo scheduler with synthetic records; there is no EHR connection in this phase.
 
-The public site and repository follow the existing HVAC demo pattern. The public experience is a clearly marked demo, not an operational clinic service. It must use synthetic patient and document content only. A real phone call can still expose a caller's real number or voice, so live phone and text use needs a separate allowlist and retention decision before public activation.
+The public site and repository follow the existing HVAC demo pattern. The public experience is a clearly marked demo, not an operational clinic service. It must use synthetic patient and document content only. A real phone call can still expose a caller's real number or voice. The call page (implemented on the branch `feat/call-page`, not deployed yet) therefore asks for consent, checks for bots, applies shared daily and per-connection limits, and stores no phone number, recording, or transcript; live text use still needs a separate allowlist and retention decision before it is switched on.
 
 ## 2. Decisions already supplied by the owner
 
@@ -24,7 +24,7 @@ The public site and repository follow the existing HVAC demo pattern. The public
 - Target the USA, UAE, Europe, and India.
 - Start with English across the named markets.
 - Include controls for both clinic scheduling timezone and viewer display timezone.
-- Limit live calls and texts to the owner's approved test numbers.
+- Limit live texts to the owner's approved test numbers (no text is sent today). Live calls were first limited to those numbers; the call page now lets visitors request a call to their own number or talk in the browser, under consent, a bot check, and shared caps (implemented, not deployed).
 - The proposed reminders are accepted: booking confirmation, a reminder 24 hours before the appointment, and one follow-up 48 hours later when requested referral documents are still missing.
 
 ## 3. Product goals
@@ -84,7 +84,7 @@ English is the initial language across the named markets. The product must be bu
 
 ### 6.2 Phone front desk
 
-An inbound Retell voice agent supports:
+A Retell voice agent (it calls the visitor or joins a browser call; it has no inbound number) supports:
 
 - Greeting and clear AI/demo disclosure.
 - Language selection from enabled languages.
@@ -214,11 +214,11 @@ These are included in the product direction, with mock behavior in the first dem
 ## 7. User experience
 
 ### Public demo
-- Landing page explains the demo, supported tasks, markets, and privacy boundary.
-- Demo selector controls clinic market, timezone, and test scenario.
+- The landing page is the call page (`#/`). It explains the demo and the privacy boundary and lets a visitor get a phone call or talk in the browser. (Implemented, not deployed; the live landing page is still the console.)
+- The clinic staff screen (`#/staff`) has the clinic market and timezone controls. The click-through call simulation is removed.
 - A user can inspect fictional appointments and FAQs without entering real health information.
-- A call/test action is clearly marked as a paid live test when real Retell credentials are enabled.
-- Live calls and texts are restricted to the owner's approved tester phone numbers.
+- A call action asks the visitor to agree first: to one AI-generated demo call at their number, or to talk with an AI voice agent and allow the microphone, and not to share real health information.
+- Live texts are off. Live calls need consent and a bot check and share daily caps; the owner's numbers skip the phone caps only.
 
 ### Staff workspace
 - Responsive browser UI with a clinic selector, timezone indicator, task queue, appointment calendar/list, FAQs, and demo reset.
@@ -234,12 +234,12 @@ The first reviewable demo is successful when:
 3. The agent never claims a write succeeded when the API did not confirm it.
 4. The approved FAQ covers at least the topics in Section 6.4 and refuses or escalates clinical questions.
 5. A staff member can see appointments, follow-up tasks, document status, and message outcomes.
-6. The reminder job sends only one confirmation/reminder/follow-up per qualifying event and respects timezone and quiet-hour settings.
+6. The reminder logic (simulated; no text is sent) creates only one confirmation/reminder/follow-up per qualifying event and respects timezone and quiet-hour settings.
 7. Changing market/timezone changes display and scheduling interpretation without changing the stored instant.
 8. A failed provider call creates a visible follow-up task instead of losing the request.
 9. Public screens, seeded data, sample uploads, and logs contain no real patient records.
 10. The demo can be reset without contacting real patients or deleting unrelated HVAC data.
-11. Real voice and SMS are disabled by default and protected by test-number allowlists, duration caps, daily limits, and message caps.
+11. Real SMS is disabled. Real voice calls need consent and a bot check and are protected by duration caps, daily and per-connection limits, a per-number cooldown, and kill switches; the owner's numbers skip the phone limits only.
 12. Setup and deployment can be reproduced from the new repository without secrets committed to Git.
 
 ## 9. Phased delivery proposal
@@ -251,10 +251,10 @@ Review this PRD and architecture, settle market/language/test-number choices, th
 Build the web console, fake clinic/scheduler, sample FAQs, synthetic appointments, document checklist, local message/call adapters, and complete admin workflows. No external account required.
 
 ### Phase 2 — cloud demo
-Deploy the Cloudflare Worker and static UI through GitHub Actions; use a private `healthcare` schema in a separate free Supabase project; seed synthetic data; add a scheduled reminder job. Keep real provider modes off.
+Deploy the Cloudflare Worker and static UI through GitHub Actions; use a private `healthcare` schema in a separate free Supabase project; seed synthetic data; add a scheduled job (on the branch `feat/call-page` it only purges expired demo data; reminders are simulated when a demo is read or changed). Keep real provider modes off.
 
 ### Phase 3 — live voice pilot
-Configure a Retell inbound agent and one test number in one chosen market. Enable only approved test numbers, short calls, limited daily usage, and minimal call data retention.
+Configure a Retell agent for outbound demo calls and browser calls, with one demo number. Enable only with consent, a bot check, short calls, limited daily usage, and minimal call data retention.
 
 ### Phase 4 — SMS pilot
 Connect the selected country-capable SMS provider, verify opt-in/opt-out, templates, quiet hours, delivery status, and deduplication using test numbers only.

@@ -7,10 +7,11 @@ import {
   DAY, DomainError, HOUR, MINUTE, appointmentTimezone, documentFollowUpTime, documentTaskDue, iso, messageText,
   outsideQuietHours, patientIsBusy, reminderTime, resolveSlot, stableId,
 } from "./schedule.ts";
+import { callerNames, likelySameSpelling, matchNames, maxCallerNames, namesMatch, normalizePersonName, patientNames, sameName } from "./names.ts";
 import { createSeedState } from "./seed.ts";
 import { formatLocalLong, isDateKey, isTimezone, localDateKey } from "./time.ts";
 import {
-  isAppointmentType, isDemoPatient, isDemoReference, limits, messageBodies, recipientPatient, taskStatuses, validateDemoState,
+  isAppointmentType, isDemoReference, limits, messageBodies, recipientPatient, taskStatuses, validateDemoState,
 } from "./validation.ts";
 import type {
   ActionContext, ActionOutcome, ActivityAction, Appointment, DemoAction, DemoState, FollowUpTask, MessageItem, MessageStatus,
@@ -21,14 +22,28 @@ export { DomainError } from "./schedule.ts";
 
 const activeStatuses = new Set<string>(["Confirmed", "Needs confirmation"]);
 const pendingMessage = (status: MessageStatus) => status === "Scheduled (demo)" || status === "Queued (demo)";
-const patientOrder = (name: string) => (allowedDemoPatients as readonly string[]).indexOf(name);
+const patientOrder = (name: string) => { const index = (allowedDemoPatients as readonly string[]).indexOf(name); return index >= 0 ? index : allowedDemoPatients.length; };
 const finishedAppointment = (item: Appointment) => item.status === "Cancelled" || item.status === "Completed" || item.status === "Missed";
 
 // ---------- input checks ----------
 
-function requirePatient(value: unknown) {
-  if (!isDemoPatient(value)) throw new DomainError(400, "sample_name_only", "Use one of the fictional sample names in the demo.");
-  return value;
+/**
+ * Resolves the patient name for a change. A name already in this demo is reused in its stored spelling (so
+ * "parshva" and "Parshva" stay one person). New names may only come from a voice call: the console offers the
+ * sample patients and the caller's own names, which keeps typed free text out of the store. A long name heard
+ * slightly differently on a later turn ("Parsva" for "Parshva") is matched to the stored one.
+ */
+function requirePatient(state: DemoState, value: unknown, ctx: ActionContext) {
+  const name = normalizePersonName(value);
+  if (!name) throw new DomainError(400, "invalid_name", "Please use a name made of letters, such as Maya or Maya Patel.");
+  const known = patientNames(state);
+  const existing = known.find((item) => sameName(item, name));
+  if (existing) return existing;
+  if (ctx.channel !== "Voice assistant") throw new DomainError(400, "unknown_patient", "Choose a sample patient or a name from your own calls.");
+  const close = known.filter((item) => likelySameSpelling(name, item));
+  if (close.length === 1) return close[0];
+  if (callerNames(state).length >= maxCallerNames) throw new DomainError(409, "too_many_names", "This demo already holds the most names it can. Use a name from an earlier booking, or reset the demo.");
+  return name;
 }
 
 function requireType(value: unknown) {
@@ -49,11 +64,23 @@ function requireInstant(value: unknown) {
 
 const notFound = () => new DomainError(404, "sample_booking_not_found", "I could not match that sample booking. Please ask the front desk to follow up.");
 
+/** The booking with this reference. When a name is given it must plausibly match (spelling-tolerant). */
 export function findAppointment(state: DemoState, reference: unknown, patient?: unknown) {
-  if (!isDemoReference(reference) || (patient !== undefined && !isDemoPatient(patient))) throw notFound();
-  const appointment = state.appointments.find((item) => item.reference === reference && (patient === undefined || item.patient === patient));
+  if (!isDemoReference(reference)) throw notFound();
+  const appointment = state.appointments.find((item) => item.reference === reference);
   if (!appointment) throw notFound();
+  if (patient !== undefined && (typeof patient !== "string" || !namesMatch(patient, appointment.patient))) throw notFound();
   return appointment;
+}
+
+/** Upcoming active bookings for the best-matching name tier (see matchNames), earliest first. */
+export function findAppointmentsByName(state: DemoState, name: string, now: number) {
+  const upcoming = state.appointments.filter((item) => activeStatuses.has(item.status) && Date.parse(item.startAt) > now);
+  const match = matchNames(name, upcoming.map((item) => item.patient));
+  return {
+    tier: match.tier,
+    appointments: upcoming.filter((item) => match.names.includes(item.patient)).sort((a, b) => a.startAt.localeCompare(b.startAt)),
+  };
 }
 
 // ---------- small state helpers ----------
@@ -74,7 +101,7 @@ function trim<T>(list: T[], max: number, removable: (item: T) => boolean) {
   return result;
 }
 
-const demoFull = () => new DomainError(409, "demo_full", "The shared sample data is full. Reset the demo data in Settings and try again.");
+const demoFull = () => new DomainError(409, "demo_full", "This demo is full. Reset your demo in Settings and try again.");
 
 function prune(state: DemoState): DemoState {
   const next: DemoState = {
@@ -90,7 +117,7 @@ function prune(state: DemoState): DemoState {
   return next;
 }
 
-function addEvent(state: DemoState, ctx: ActionContext, action: ActivityAction, details: { patient?: string; reference?: string } = {}, part: string = action): DemoState {
+function addEvent(state: DemoState, ctx: ActionContext, action: ActivityAction, details: { patient?: string; reference?: string; taskId?: string } = {}, part: string = action): DemoState {
   const id = stableId("evt", ctx.key, part);
   if (state.events.some((item) => item.id === id)) return state;
   return { ...state, events: [{ id, at: iso(ctx.now), action, channel: ctx.channel, ...details }, ...state.events] };
@@ -161,7 +188,7 @@ function releaseOpeningToWaitlist(state: DemoState, appointment: Appointment, ct
 // ---------- actions ----------
 
 function bookAppointment(state: DemoState, action: Extract<DemoAction, { type: "book_appointment" }>, ctx: ActionContext): ActionOutcome {
-  const patient = requirePatient(action.patient);
+  const patient = requirePatient(state, action.patient, ctx);
   const type = requireType(action.appointmentType);
   const timezone = requireTimezone(action.timezone);
   const requested = requireInstant(action.startAt);
@@ -171,7 +198,7 @@ function bookAppointment(state: DemoState, action: Extract<DemoAction, { type: "
     const key = attempt === 0 ? ctx.key : `${ctx.key}|rebook-${attempt}`;
     const existing = state.appointments.find((item) => item.id === stableId("apt", key, "appointment"));
     if (!existing) return createBooking(state, { patient, type, timezone, requested, provider: action.provider }, { ...ctx, key });
-    const sameBooking = activeStatuses.has(existing.status) && existing.patient === patient && existing.type === type
+    const sameBooking = activeStatuses.has(existing.status) && sameName(existing.patient, patient) && existing.type === type
       && Math.abs(Date.parse(existing.startAt) - requested) < MINUTE && (action.provider === undefined || existing.provider === action.provider);
     if (sameBooking) return { state, changed: false, appointment: existing, message: "Sample appointment confirmed. No text was sent." };
   }
@@ -186,7 +213,7 @@ function createBooking(state: DemoState, input: { patient: string; type: string;
   if (patientIsBusy(state, patient, Date.parse(slot.startAt), type)) throw new DomainError(409, "patient_busy", "That sample patient already has an appointment at that time. Offer another time.");
 
   const appointments = trim(state.appointments, limits.appointments - 1, (item) => finishedAppointment(item) || Date.parse(item.startAt) < ctx.now - DAY);
-  if (appointments.length >= limits.appointments) throw new DomainError(409, "schedule_full", "The sample schedule is full. Reset the demo data in Settings and try again.");
+  if (appointments.length >= limits.appointments) throw new DomainError(409, "schedule_full", "This demo's schedule is full. Reset your demo in Settings and try again.");
   const reference = freshReference(state, ctx.random);
   const needsDocuments = typesNeedingDocuments.has(type);
   const appointment: Appointment = {
@@ -294,13 +321,13 @@ function recordAttendance(state: DemoState, action: Extract<DemoAction, { type: 
 }
 
 function joinWaitlist(state: DemoState, action: Extract<DemoAction, { type: "join_waitlist" }>, ctx: ActionContext): ActionOutcome {
-  const patient = requirePatient(action.patient);
+  const patient = requirePatient(state, action.patient, ctx);
   const appointmentType = requireType(action.appointmentType);
   const timezone = requireTimezone(action.timezone);
   if (!isDateKey(action.preferredDate)) throw new DomainError(400, "invalid_date", "Use a valid date like 2026-10-15.");
   if (action.preferredDate < localDateKey(ctx.now, timezone)) throw new DomainError(400, "invalid_date", "Choose today or a later date for the waitlist.");
   const id = stableId("wait", ctx.key, "request");
-  const existing = state.waitlist.find((item) => item.id === id || (item.patient === patient && item.appointmentType === appointmentType
+  const existing = state.waitlist.find((item) => item.id === id || (sameName(item.patient, patient) && item.appointmentType === appointmentType
     && item.preferredDate === action.preferredDate && item.timezone === timezone && (item.status === "Waiting" || item.status === "Opening found")));
   if (existing) return { state, changed: false, waitlistItem: existing, message: "That sample request is already on the waitlist. No text was sent." };
   const waitlistItem: WaitlistItem = { id, patient, appointmentType, preferredDate: action.preferredDate, timezone, createdAt: iso(ctx.now), status: "Waiting" };
@@ -345,11 +372,12 @@ function markDocumentReceived(state: DemoState, action: Extract<DemoAction, { ty
 function createTask(state: DemoState, action: Extract<DemoAction, { type: "create_task" }>, ctx: ActionContext): ActionOutcome {
   const template = requestTemplates[action.requestType];
   if (!template) throw new DomainError(400, "invalid_request_type", "Choose a supported front-desk request.");
+  const patient = action.patient === undefined ? "Front desk" : requirePatient(state, action.patient, ctx);
   const { state: withTask, task, created } = addTask(state, ctx, `request-${action.requestType}`, {
-    title: template.title, patient: "Front desk", detail: template.detail, dueAt: iso(ctx.now + 2 * HOUR), priority: template.priority, status: "Open",
+    title: template.title, patient, detail: template.detail, dueAt: iso(ctx.now + 2 * HOUR), priority: template.priority, status: "Open",
   });
   if (!created) return { state, changed: false, task, message: "The sample follow-up is already in the staff queue. No personal details were stored." };
-  const next = addEvent(withTask, ctx, "Staff task created", { patient: "Front desk" });
+  const next = addEvent(withTask, ctx, "Staff task created", { patient, taskId: task.id });
   return { state: prune(next), changed: true, task, message: "A sample follow-up was added for the front desk. No personal details were stored." };
 }
 
@@ -364,13 +392,13 @@ function updateTask(state: DemoState, action: Extract<DemoAction, { type: "updat
 }
 
 function setSmsPreference(state: DemoState, action: Extract<DemoAction, { type: "set_sms_preference" }>, ctx: ActionContext): ActionOutcome {
-  const patient = requirePatient(action.patient);
+  const patient = requirePatient(state, action.patient, ctx);
   if (isOptedOut(state, patient) === action.optedOut) return { state, changed: false, message: action.optedOut ? "Text reminders are already off." : "Text reminders are already on." };
   const preference = { patient, optedOut: action.optedOut, updatedAt: iso(ctx.now) };
   let next: DemoState = {
     ...state,
     smsPreferences: [...state.smsPreferences.filter((item) => item.patient !== patient), preference]
-      .sort((a, b) => patientOrder(a.patient) - patientOrder(b.patient)),
+      .sort((a, b) => patientOrder(a.patient) - patientOrder(b.patient) || a.patient.localeCompare(b.patient)),
   };
   if (action.optedOut) {
     next = { ...next, messages: next.messages.map((message) => recipientPatient(message.recipient) === patient && pendingMessage(message.status) ? { ...message, status: "Suppressed (opt-out)" as const } : message) };
@@ -461,11 +489,23 @@ export function normalizeDemoState(raw: unknown): { state: DemoState; migrated: 
     seen.add(`${item.id}-${suffix}`);
     return { ...item, id: `${item.id}-${suffix}` };
   });
-  const repaired: DemoState = {
+  const deduped: DemoState = {
     ...state,
     appointments: dedupe(state.appointments), tasks: dedupe(state.tasks), referrals: dedupe(state.referrals),
     messages: dedupe(state.messages), waitlist: dedupe(state.waitlist), events: dedupe(state.events),
   };
+  // Older versions allowed longer lists. Drop the oldest finished records (never open work) to fit today's limits.
+  const repaired: DemoState = {
+    ...deduped,
+    appointments: trim(deduped.appointments, limits.appointments, (item) => finishedAppointment(item)),
+    tasks: trim(deduped.tasks, limits.tasks, (item) => item.status === "Done"),
+    referrals: trim(deduped.referrals, limits.referrals, (item) => item.status === "Received"),
+    messages: trim(deduped.messages, limits.messages, (item) => !pendingMessage(item.status)),
+    waitlist: trim(deduped.waitlist, limits.waitlist, (item) => item.status === "Cancelled" || item.status === "Booked"),
+    events: deduped.events.slice(0, limits.events),
+  };
+  const trimmed = (Object.keys(deduped) as (keyof DemoState)[]).some((key) => deduped[key].length !== repaired[key].length);
+  if (trimmed) migrated = true;
   return validateDemoState(repaired) ? { state: repaired, migrated } : null;
 }
 
@@ -480,7 +520,7 @@ const actionShapes: Record<DemoAction["type"], Record<string, "string" | "boolea
   join_waitlist: { patient: "string", appointmentType: "string", preferredDate: "string", timezone: "string" },
   cancel_waitlist: { waitlistId: "string" },
   mark_document_received: { documentId: "string" },
-  create_task: { requestType: "string" },
+  create_task: { requestType: "string", patient: "string?" },
   update_task: { taskId: "string", status: "string" },
   set_sms_preference: { patient: "string", optedOut: "boolean" },
   reset_demo: {},

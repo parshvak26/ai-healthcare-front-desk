@@ -94,6 +94,8 @@ export interface ActivityEvent {
   channel: Channel;
   patient?: string;
   reference?: string;
+  /** The staff task this event created, so a call summary can name it. */
+  taskId?: string;
 }
 
 export interface SmsPreference {
@@ -137,7 +139,7 @@ export type DemoAction =
   | { type: "join_waitlist"; patient: string; appointmentType: string; preferredDate: string; timezone: string }
   | { type: "cancel_waitlist"; waitlistId: string }
   | { type: "mark_document_received"; documentId: string }
-  | { type: "create_task"; requestType: RequestType }
+  | { type: "create_task"; requestType: RequestType; patient?: string }
   | { type: "update_task"; taskId: string; status: TaskStatus }
   | { type: "set_sms_preference"; patient: string; optedOut: boolean }
   | { type: "reset_demo" };

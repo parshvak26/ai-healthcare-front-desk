@@ -69,3 +69,11 @@ export function searchApprovedFaq(rawQuestion: string): FaqSearchResult {
     suggestedRequest: "faq",
   };
 }
+
+/**
+ * The approved answers as the voice agent says them. This exact block is pasted into the agent prompt between
+ * the FAQ markers in retell/AGENT_PROMPT.md; a test keeps the two in sync.
+ */
+export function voiceFaqPromptBlock() {
+  return faqEntries.map((item) => `- "${item.question}" → ${item.voiceAnswer}`).join("\n");
+}

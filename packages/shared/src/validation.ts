@@ -1,14 +1,18 @@
-// Strict allowlist validation for the shared demo snapshot. Anything outside the fictional catalog is rejected,
-// which keeps free text (and therefore real personal or health information) out of the public demo store.
+// Strict allowlist validation for a demo snapshot. Apart from patient names (letters only, see names.ts), every
+// field is fixed catalog text, an ID, a reference, a status or a timestamp, so free text (and therefore real
+// health information) cannot be stored.
 import {
   allowedDemoPatients, legacyTaskDetails, legacyTaskTitles, providers, requestTemplates, serviceDurations, systemTaskTemplates,
 } from "./catalog.ts";
+import { callerNames, isPatientName, isSamplePatient, maxCallerNames } from "./names.ts";
 import { isDateKey, isTimezone, isUtcTimestamp } from "./time.ts";
 import type { ActivityAction, Channel, DemoState } from "./types.ts";
 
-export const limits = { appointments: 100, tasks: 100, referrals: 100, messages: 400, waitlist: 100, events: 100 } as const;
+/** Per-demo list limits. They keep one private demo small (well under maxStateBytes) for the free database tier. */
+export const limits = { appointments: 60, tasks: 60, referrals: 60, messages: 120, waitlist: 40, events: 60, smsPreferences: allowedDemoPatients.length + maxCallerNames } as const;
+/** Largest stored snapshot, in bytes of JSON. Checked by the Worker and again by the database. */
+export const maxStateBytes = 128 * 1024;
 
-const patientNames = new Set<string>(allowedDemoPatients);
 const referencePattern = /^DEMO-\d{4}$/;
 const idPattern = /^[A-Za-z0-9-]{1,100}$/;
 
@@ -65,8 +69,9 @@ function oneOf<T extends string>(value: unknown, options: readonly T[]): value i
   return typeof value === "string" && (options as readonly string[]).includes(value);
 }
 
+/** One of the five built-in sample patients. */
 export function isDemoPatient(value: unknown): value is string {
-  return typeof value === "string" && patientNames.has(value);
+  return isSamplePatient(value);
 }
 
 export function isDemoReference(value: unknown): value is string {
@@ -85,7 +90,7 @@ function validRecipient(value: unknown) {
   if (typeof value !== "string" || value.length > 120) return false;
   if (value === "Front desk") return true;
   const [name, reference, extra] = value.split(" · ");
-  return isDemoPatient(name) && extra === undefined && (reference === undefined || isDemoReference(reference));
+  return isPatientName(name) && extra === undefined && (reference === undefined || isDemoReference(reference));
 }
 
 function validBody(value: unknown) {
@@ -118,14 +123,14 @@ export function validateDemoState(value: unknown): value is DemoState {
   const s = state as DemoState;
   if (s.appointments.length > limits.appointments || s.tasks.length > limits.tasks || s.referrals.length > limits.referrals
     || s.messages.length > limits.messages || s.waitlist.length > limits.waitlist || s.events.length > limits.events
-    || s.smsPreferences.length > allowedDemoPatients.length) return false;
+    || s.smsPreferences.length > limits.smsPreferences) return false;
 
   const ids = new Set<string>();
   const unique = (id: string) => { if (ids.has(id)) return false; ids.add(id); return true; };
 
   for (const item of s.appointments) {
     if (!hasOnlyKeys(item, ["id", "patient", "reference", "type", "provider", "location", "startAt", "timezone", "status", "documents"])) return false;
-    if (typeof item.id !== "string" || !idPattern.test(item.id) || !unique(item.id) || !isDemoPatient(item.patient) || !isDemoReference(item.reference) || !isAppointmentType(item.type)) return false;
+    if (typeof item.id !== "string" || !idPattern.test(item.id) || !unique(item.id) || !isPatientName(item.patient) || !isDemoReference(item.reference) || !isAppointmentType(item.type)) return false;
     if (!providers.some((provider) => provider.name === item.provider && provider.location === item.location)) return false;
     if (!isUtcTimestamp(item.startAt) || (item.timezone !== undefined && !isTimezone(item.timezone))) return false;
     if (!oneOf(item.status, appointmentStatuses) || !oneOf(item.documents, documentStatuses)) return false;
@@ -134,7 +139,7 @@ export function validateDemoState(value: unknown): value is DemoState {
 
   for (const item of s.tasks) {
     if (!hasOnlyKeys(item, ["id", "title", "patient", "detail", "dueAt", "priority", "status", "appointmentReference"])) return false;
-    if (typeof item.id !== "string" || !idPattern.test(item.id) || !unique(item.id) || !(isDemoPatient(item.patient) || item.patient === "Front desk")) return false;
+    if (typeof item.id !== "string" || !idPattern.test(item.id) || !unique(item.id) || !(isPatientName(item.patient) || item.patient === "Front desk")) return false;
     if (!taskTitles.has(item.title) || !taskDetails.has(item.detail) || !isUtcTimestamp(item.dueAt)) return false;
     if (!oneOf(item.priority, ["Normal", "Today", "Urgent"] as const) || !oneOf(item.status, taskStatuses)) return false;
     if (item.appointmentReference !== undefined && !isDemoReference(item.appointmentReference)) return false;
@@ -142,7 +147,7 @@ export function validateDemoState(value: unknown): value is DemoState {
 
   for (const item of s.referrals) {
     if (!hasOnlyKeys(item, ["id", "patient", "reference", "appointment", "document", "receivedAt", "status"])) return false;
-    if (typeof item.id !== "string" || !idPattern.test(item.id) || !unique(item.id) || !isDemoPatient(item.patient) || !isDemoReference(item.reference)) return false;
+    if (typeof item.id !== "string" || !idPattern.test(item.id) || !unique(item.id) || !isPatientName(item.patient) || !isDemoReference(item.reference)) return false;
     if (typeof item.document !== "string" || !/^(Referral letter|Intake form|Insurance card|Referral document) · sample(?:\.pdf| image| needed)?$/.test(item.document)) return false;
     if (!isAppointmentType(item.appointment) || (item.receivedAt !== undefined && !isUtcTimestamp(item.receivedAt))) return false;
     if (!oneOf(item.status, documentStatuses)) return false;
@@ -158,23 +163,24 @@ export function validateDemoState(value: unknown): value is DemoState {
 
   for (const item of s.waitlist) {
     if (!hasOnlyKeys(item, ["id", "patient", "appointmentType", "preferredDate", "timezone", "createdAt", "status"])) return false;
-    if (typeof item.id !== "string" || !idPattern.test(item.id) || !unique(item.id) || !isDemoPatient(item.patient) || !isAppointmentType(item.appointmentType)) return false;
+    if (typeof item.id !== "string" || !idPattern.test(item.id) || !unique(item.id) || !isPatientName(item.patient) || !isAppointmentType(item.appointmentType)) return false;
     if (!isDateKey(item.preferredDate) || !isTimezone(item.timezone) || !isUtcTimestamp(item.createdAt) || !oneOf(item.status, waitlistStatuses)) return false;
   }
 
   for (const item of s.events) {
-    if (!hasOnlyKeys(item, ["id", "at", "action", "channel", "patient", "reference"])) return false;
+    if (!hasOnlyKeys(item, ["id", "at", "action", "channel", "patient", "reference", "taskId"])) return false;
     if (typeof item.id !== "string" || !idPattern.test(item.id) || !unique(item.id) || !isUtcTimestamp(item.at)) return false;
     if (!oneOf(item.action, activityActions) || !oneOf(item.channel, channels)) return false;
-    if (item.patient !== undefined && !(isDemoPatient(item.patient) || item.patient === "Front desk")) return false;
+    if (item.patient !== undefined && !(isPatientName(item.patient) || item.patient === "Front desk")) return false;
     if (item.reference !== undefined && !isDemoReference(item.reference)) return false;
+    if (item.taskId !== undefined && (typeof item.taskId !== "string" || !idPattern.test(item.taskId))) return false;
   }
 
   const seen = new Set<string>();
   for (const item of s.smsPreferences) {
     if (!hasOnlyKeys(item, ["patient", "optedOut", "updatedAt"])) return false;
-    if (!isDemoPatient(item.patient) || seen.has(item.patient) || typeof item.optedOut !== "boolean" || !isUtcTimestamp(item.updatedAt)) return false;
+    if (!isPatientName(item.patient) || seen.has(item.patient) || typeof item.optedOut !== "boolean" || !isUtcTimestamp(item.updatedAt)) return false;
     seen.add(item.patient);
   }
-  return true;
+  return callerNames(s).length <= maxCallerNames;
 }

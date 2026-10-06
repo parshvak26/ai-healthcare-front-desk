@@ -1,5 +1,6 @@
 // Slot, reminder, and identifier rules shared by the browser, the Worker, and the voice tools.
 import { clinicHours, defaultClinicTimezone, providers, quietHours, serviceDurations } from "./catalog.ts";
+import { sameName } from "./names.ts";
 import {
   addDaysToDateKey, formatLocalLong, isDateKey, isTimezone, localDateKey, localParts, timezoneLabel, weekdayOfDateKey, zonedTimeToUtc,
 } from "./time.ts";
@@ -126,10 +127,90 @@ export function resolveSlot(state: Pick<DemoState, "appointments">, request: Slo
   return provider ? toSlot(startAt, request.timezone, provider) : null;
 }
 
-/** True when the same sample patient already has an active visit overlapping this time. */
+export type PartOfDay = "any" | "morning" | "afternoon";
+
+export interface AvailabilitySearch {
+  /** First local clinic date to search (YYYY-MM-DD). */
+  startDate: string;
+  /** Calendar days to search from startDate, 1–14. Closed days count but have no slots. */
+  days: number;
+  appointmentType: string;
+  timezone: string;
+  now: number;
+  partOfDay?: PartOfDay;
+  /** Earliest local start time, "HH:MM". */
+  earliestTime?: string;
+  provider?: string;
+  /** How many offers to return (1–5, default 3). */
+  limit?: number;
+  ignoreAppointmentId?: string;
+}
+
+export interface SearchResult {
+  slots: AvailabilitySlot[];
+  /** True when more open times exist in the searched range than were offered. */
+  moreAvailable: boolean;
+  searchedFrom: string;
+  searchedTo: string;
+}
+
+/**
+ * Finds open times across several days and picks a few that are genuinely different choices: the earliest,
+ * then a later part of the same day, then another day, rather than 8:00, 8:30 and 9:00.
+ */
+export function searchAvailability(state: Pick<DemoState, "appointments">, query: AvailabilitySearch): SearchResult {
+  if (!isDateKey(query.startDate)) throw new DomainError(400, "invalid_date", "Use a valid date like 2026-10-15.");
+  if (!Number.isInteger(query.days) || query.days < 1 || query.days > 14) throw new DomainError(400, "invalid_range", "Search between 1 and 14 days.");
+  if (query.provider !== undefined && !providers.some((item) => item.name === query.provider)) throw new DomainError(400, "invalid_provider", "Choose one of the sample providers.");
+  const earliest = query.earliestTime === undefined ? null : /^([01]\d|2[0-3]):([0-5]\d)$/.exec(query.earliestTime);
+  if (query.earliestTime !== undefined && !earliest) throw new DomainError(400, "invalid_time", "Use a time like 13:30.");
+  const earliestMinute = earliest ? Number(earliest[1]) * 60 + Number(earliest[2]) : 0;
+  const limit = Math.min(5, Math.max(1, query.limit ?? 3));
+  const today = localDateKey(query.now, query.timezone);
+  const from = query.startDate < today ? today : query.startDate;
+  const to = addDaysToDateKey(from, query.days - 1);
+
+  const all: AvailabilitySlot[] = [];
+  for (let date = from; date <= to; date = addDaysToDateKey(date, 1)) {
+    for (const startAt of slotGrid(date, query.appointmentType, query.timezone, query.now)) {
+      const local = localParts(Date.parse(startAt), query.timezone);
+      const minute = local.hour * 60 + local.minute;
+      if (minute < earliestMinute) continue;
+      if (query.partOfDay === "morning" && minute >= 12 * 60) continue;
+      if (query.partOfDay === "afternoon" && minute < 12 * 60) continue;
+      const provider = providers.find((item) => (query.provider === undefined || item.name === query.provider)
+        && !providerIsBusy(state, item.name, Date.parse(startAt), query.appointmentType, query.ignoreAppointmentId));
+      if (provider) all.push(toSlot(startAt, query.timezone, provider));
+    }
+  }
+
+  const chosen: AvailabilitySlot[] = [];
+  const day = (slot: AvailabilitySlot) => localDateKey(Date.parse(slot.startAt), query.timezone);
+  const gap = (a: AvailabilitySlot, b: AvailabilitySlot) => Math.abs(Date.parse(a.startAt) - Date.parse(b.startAt));
+  const take = (predicate: (slot: AvailabilitySlot) => boolean) => {
+    if (chosen.length >= limit) return;
+    const found = all.find((slot) => !chosen.includes(slot) && predicate(slot));
+    if (found) chosen.push(found);
+  };
+  if (all.length) {
+    chosen.push(all[0]);
+    take((slot) => day(slot) === day(all[0]) && gap(slot, all[0]) >= 150 * MINUTE);
+    while (chosen.length < limit) {
+      const before = chosen.length;
+      take((slot) => !chosen.some((item) => day(item) === day(slot)));
+      if (chosen.length === before) take((slot) => chosen.every((item) => gap(item, slot) >= 60 * MINUTE));
+      if (chosen.length === before) take(() => true);
+      if (chosen.length === before) break;
+    }
+  }
+  chosen.sort((a, b) => a.startAt.localeCompare(b.startAt));
+  return { slots: chosen, moreAvailable: all.length > chosen.length, searchedFrom: from, searchedTo: to };
+}
+
+/** True when the same patient already has an active visit overlapping this time. Names compare without case or accents. */
 export function patientIsBusy(state: Pick<DemoState, "appointments">, patient: string, startMs: number, type: string, ignoreAppointmentId?: string) {
   const endMs = startMs + (serviceDurations[type] || 30) * MINUTE;
-  return state.appointments.some((item) => item.patient === patient && item.id !== ignoreAppointmentId
+  return state.appointments.some((item) => sameName(item.patient, patient) && item.id !== ignoreAppointmentId
     && (item.status === "Confirmed" || item.status === "Needs confirmation")
     && startMs < appointmentEnd(item) && Date.parse(item.startAt) < endMs);
 }

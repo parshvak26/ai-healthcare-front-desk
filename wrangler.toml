@@ -12,10 +12,16 @@ CLINIC_ID = "harbor-health-demo"
 PUBLIC_ORIGINS = "https://parshvak26.github.io,http://localhost:5173"
 SMS_MODE = "mock"
 SUPABASE_URL = "https://tboxzutkvypdowophees.supabase.co"
-# Public "Call me" demo calls (see apps/worker/src/calls.ts). Set DEMO_CALLS to "off" to stop new calls at once.
-# They also need the TURNSTILE_SECRET_KEY and RETELL_API_KEY secrets; RETELL_TEST_NUMBERS (secret) lists the
-# owner's numbers, which skip the daily limits.
+# Public demo calls (see apps/worker/src/calls.ts). Set DEMO_CALLS to "off" to stop all new calls at once, or
+# DEMO_WEB_CALLS to "off" to stop only browser calls. They also need the TURNSTILE_SECRET_KEY and RETELL_API_KEY
+# secrets; RETELL_TEST_NUMBERS (secret) lists the owner's numbers, which skip the phone limits.
 DEMO_CALLS = "on"
+DEMO_WEB_CALLS = "on"
+# Sent with every call so Retell reports call_started / call_ended to this Worker. Browser calls stay off without it.
+RETELL_EVENTS_URL = "https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev/webhooks/retell/events"
+# Published agent version this Worker is paired with (version 0 = the prompt in use before the call page). Bump it
+# after the new agent version is published in Retell, then redeploy. Remove it to use "latest_published".
+RETELL_AGENT_VERSION = "0"
 RETELL_FROM_NUMBER = "+15128231502"
 RETELL_AGENT_ID = "agent_bcd0e610f4535270f5642efeb0"
 TURNSTILE_HOSTNAME = "parshvak26.github.io"

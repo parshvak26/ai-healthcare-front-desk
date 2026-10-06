@@ -312,15 +312,6 @@ h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; 
 .timezone-hint strong { color: #657c76; font-weight: 700; }
 .modal-disclaimer { padding: 10px; border-radius: 7px; background: #f5f8f8; color: #84929d; font-size: 8px; line-height: 1.45; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
-.call-modal { width: min(100%, 520px); }
-.call-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 13px; }
-.call-option { display: flex; align-items: center; gap: 9px; min-height: 59px; padding: 9px; border: 1px solid #e9edf1; border-radius: 9px; background: white; text-align: left; transition: border .15s ease, background .15s ease; }
-.call-option:hover { border-color: #b5d7ce; background: #fbfefd; }
-.call-option-icon { width: 27px; height: 27px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 7px; background: #edf6f3; color: #308d7f; font-size: 12px; }
-.call-option > span:nth-child(2) { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.call-option strong { color: #506174; font-size: 8px; }
-.call-option small { color: #9ba5af; font-size: 7px; }
-.call-option-arrow { color: #91a0ab; font-size: 12px; }
 .toast { position: fixed; z-index: 50; right: 25px; bottom: 24px; display: flex; align-items: center; gap: 9px; max-width: min(420px, calc(100vw - 32px)); padding: 12px 15px; border: 1px solid #d5e9e1; border-radius: 9px; background: #fff; box-shadow: 0 9px 26px rgba(26, 53, 65, .14); color: #506b60; font-size: 10px; animation: toast-in .2s ease-out; }
 .toast > span { width: 19px; height: 19px; display: grid; place-items: center; border-radius: 50%; background: #e7f5ee; color: #3c9a74; font-size: 10px; font-weight: 800; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
@@ -418,7 +409,6 @@ h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; 
   .reset-card { align-items: flex-start; flex-direction: column; }
   .footer-note { align-items: flex-start; font-size: 7px; line-height: 1.4; }
   .footer-note button { white-space: nowrap; }
-  .call-options { grid-template-columns: 1fr; }
   .modal-card { padding: 17px; }
 }
 
@@ -467,24 +457,19 @@ h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; 
   .inline-actions { flex-wrap: wrap; }
 }
 
-/* "Call me" real demo call */
-.call-me-card { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 14px; padding: 14px; border: 1px solid #d5e9e1; border-radius: 10px; background: #f6fbf9; }
-.call-me-card form { display: flex; flex-direction: column; gap: 9px; }
-.call-me-heading { display: flex; align-items: center; gap: 10px; }
-.call-me-heading > div { display: flex; flex-direction: column; gap: 3px; }
-.call-me-heading strong { color: #24384a; font-size: 11px; }
-.call-me-heading small { color: #758493; font-size: 9px; line-height: 1.4; }
-.call-me-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 9px; background: #0b8a83; color: #fff; font-size: 15px; }
-.call-me-ringing { animation: call-pulse 1.4s ease-in-out infinite; }
-@keyframes call-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(11, 138, 131, .35); } 50% { box-shadow: 0 0 0 7px rgba(11, 138, 131, 0); } }
-.call-me-hint { margin-top: -4px; color: #8d9aa6; font-size: 8px; }
-.call-me-consent { display: flex; align-items: flex-start; gap: 8px; color: #5d6e7f; font-size: 9px; line-height: 1.45; }
-.call-me-consent input { margin-top: 2px; }
-.call-me-error { padding: 8px 10px; border: 1px solid #f1cdca; border-radius: 7px; background: #fff6f5; color: #a5504a; font-size: 9px; line-height: 1.4; }
-.call-me-tips { margin: 0; padding-left: 16px; color: #5d6e7f; font-size: 9px; line-height: 1.6; }
-.call-me-success .text-button { align-self: flex-start; padding-left: 0; }
-.call-me-off { background: #f8fafb; border-color: #e6edf0; }
-.call-me-off .call-me-icon { background: #c4d2d8; }
+/* Private demo: links to the call page, "From your call" tags, delete data */
+a.button, a.assistant-link, a.text-button { text-decoration: none; }
+a:focus-visible { outline: 3px solid rgba(11, 138, 131, .23); outline-offset: 2px; border-radius: 4px; }
+[tabindex="-1"]:focus { outline: none; }
+.crumb-home { color: #6f8a85; font-weight: 700; text-decoration: none; }
+.crumb-home:hover { color: #0b827b; }
+.from-call-tag { display: inline-flex; align-items: center; margin-left: 7px; padding: 2px 6px; border-radius: 4px; background: #e3f3f0; color: #07625c; font-size: 7px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; vertical-align: 1px; }
+.button-danger { color: #a3352c; border-color: #f0d3cf; }
+.button-danger:hover { border-color: #d9867e; background: #fff8f7; }
+.settings-call-link { margin-top: 10px; padding-left: 0; }
 .turnstile-box { min-height: 65px; }
-.call-section-label { margin: 0 0 8px; color: #8d9aa6; font-size: 8px; font-weight: 800; letter-spacing: .9px; text-transform: uppercase; }
-@media (prefers-reduced-motion: reduce) { .call-me-ringing { animation: none; } }
+@media (max-width: 720px) {
+  /* Keep the "private demo" indicator visible on phones; the page name is enough breadcrumb there. */
+  .breadcrumb > :not(strong) { display: none; }
+  .demo-indicator { display: flex; gap: 6px; font-size: 7.5px; letter-spacing: .5px; text-align: right; }
+}

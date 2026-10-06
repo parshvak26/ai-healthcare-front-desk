@@ -1,128 +1,300 @@
 {
-  "note": "Create each entry as a Retell custom function: POST to https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev/webhooks/retell/custom-function, timeout 15 seconds, max retries 0, no extra headers or query parameters, and 'Payload: args only' turned OFF (the Worker needs the name, args, and call fields). The Worker verifies X-Retell-Signature with the server-side RETELL_API_KEY secret and only answers allowlisted test numbers (RETELL_TEST_NUMBERS). Business outcomes such as a taken slot come back as HTTP 200 with success=false and a message, because Retell does not show the agent the body of a non-2xx response. Write tools are idempotent per call: a repeated call with the same arguments returns the first result.",
-  "settings": { "method": "POST", "timeout_seconds": 15, "max_retries": 0, "payload_args_only": false },
+  "note": "Create each entry as a Retell custom function: POST to https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev/webhooks/retell/custom-function, timeout 10 seconds, max retries 0, no extra headers or query parameters, and 'Payload: args only' turned OFF (the Worker needs the name, args and call fields). The Worker verifies X-Retell-Signature with the RETELL_API_KEY secret and answers only calls it started itself (signed metadata) or allowlisted owner numbers. It always uses the clinic time zone, so no tool takes a timezone. Business outcomes such as a taken slot come back as HTTP 200 with success=false and a message, because Retell does not show the agent the body of a non-2xx response. Write tools are idempotent per call, so retrying with the same details never books twice. Every result may include seconds_left (time left in the call). Where 'speak_during_execution' is given, turn on 'Speak during execution' with that static sentence; otherwise leave it off. The previous search_approved_faq function is no longer used (the approved answers are in the prompt) and should be removed from the agent; the Worker still answers it for older versions.",
+  "settings": {
+    "method": "POST",
+    "timeout_seconds": 10,
+    "max_retries": 0,
+    "payload_args_only": false
+  },
   "functions": [
     {
       "name": "get_availability",
-      "description": "Check fictional appointment openings for one clinic date. Use only after the caller picks a date and appointment type. Offer only the returned slots and read each one as its local_time. Never invent available times.",
+      "description": "Search open appointment times. Returns up to three different options with a spoken time (and caller_time when the caller's time zone differs), plus more_available.",
+      "speak_during_execution": "One moment, let me check.",
       "parameters": {
         "type": "object",
-        "required": ["date", "appointment_type"],
+        "required": [
+          "appointment_type",
+          "start_date"
+        ],
         "properties": {
-          "date": { "type": "string", "description": "Local clinic date in YYYY-MM-DD format." },
-          "appointment_type": { "type": "string", "enum": ["New patient visit", "Follow-up visit", "Consultation", "Administrative call"] },
-          "timezone": { "type": "string", "description": "IANA clinic timezone. Omit to use the clinic default, America/Chicago." }
+          "appointment_type": {
+            "type": "string",
+            "enum": [
+              "New patient visit",
+              "Follow-up visit",
+              "Consultation",
+              "Administrative call"
+            ]
+          },
+          "start_date": {
+            "type": "string",
+            "description": "First clinic date to search, YYYY-MM-DD, taken from the calendar in the prompt."
+          },
+          "search_days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 14,
+            "description": "How many calendar days to search from start_date. 1 for a single day; 5 for 'this week' or 'soonest'; up to 14."
+          },
+          "time_of_day": {
+            "type": "string",
+            "enum": [
+              "any",
+              "morning",
+              "afternoon"
+            ],
+            "description": "Morning is before noon, afternoon from noon (clinic time)."
+          },
+          "earliest_time": {
+            "type": "string",
+            "description": "Only times at or after this clinic time, HH:MM 24-hour (for 'after 3' or 'anything later')."
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "Dr. Avery Chen",
+              "Dr. Noah Rivera"
+            ],
+            "description": "Only when the caller asks for a specific doctor."
+          }
         }
       }
     },
     {
       "name": "create_appointment",
-      "description": "Book a fictional appointment only after the caller confirms one slot returned by get_availability. Pass that slot's start_at and provider. Use one of the sample names only. Say it is booked only if success is true, and give the returned DEMO reference.",
+      "description": "Book one of the times returned by get_availability. Returns the reference, reference_spoken and the booked time.",
+      "speak_during_execution": "Great, booking that now.",
       "parameters": {
         "type": "object",
-        "required": ["patient_name", "appointment_type", "start_at"],
+        "required": [
+          "patient_name",
+          "appointment_type",
+          "start_at"
+        ],
         "properties": {
-          "patient_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] },
-          "appointment_type": { "type": "string", "enum": ["New patient visit", "Follow-up visit", "Consultation", "Administrative call"] },
-          "start_at": { "type": "string", "description": "The start_at value of the chosen slot from get_availability (UTC ISO-8601)." },
-          "timezone": { "type": "string", "description": "IANA clinic timezone used for get_availability. Omit for America/Chicago." },
-          "provider": { "type": "string", "enum": ["Dr. Avery Chen", "Dr. Noah Rivera"], "description": "The provider of the chosen slot from get_availability, so the booking matches what the caller was offered." }
+          "patient_name": {
+            "type": "string",
+            "maxLength": 60,
+            "description": "The person's name exactly as the caller gave or spelled it (any name; letters only)."
+          },
+          "appointment_type": {
+            "type": "string",
+            "enum": [
+              "New patient visit",
+              "Follow-up visit",
+              "Consultation",
+              "Administrative call"
+            ]
+          },
+          "start_at": {
+            "type": "string",
+            "description": "The start_at of the chosen slot, copied exactly from get_availability."
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "Dr. Avery Chen",
+              "Dr. Noah Rivera"
+            ],
+            "description": "The provider of the chosen slot, copied from get_availability."
+          }
         }
       }
     },
     {
       "name": "lookup_appointment",
-      "description": "Read a fictional appointment after the caller gives its DEMO reference and sample name. Read back local_time, appointment type, location, and status. Use before rescheduling or cancelling.",
+      "description": "Find upcoming bookings by name, or one booking by reference (with the name to verify, if known). Returns up to five appointments with spoken times; match tells how the name matched.",
       "parameters": {
         "type": "object",
-        "required": ["booking_reference", "verification_name"],
         "properties": {
-          "booking_reference": { "type": "string", "pattern": "^DEMO-[0-9]{4}$" },
-          "verification_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] }
+          "booking_reference": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "The booking reference: DEMO-4812, or just its four digits."
+          },
+          "patient_name": {
+            "type": "string",
+            "maxLength": 60,
+            "description": "The person's name exactly as the caller gave or spelled it (any name; letters only)."
+          }
         }
       }
     },
     {
       "name": "confirm_appointment",
-      "description": "Confirm a fictional appointment whose status is Needs confirmation, after matching its DEMO reference and sample name and getting the caller's agreement.",
+      "description": "Confirm a booking whose status is Needs confirmation.",
       "parameters": {
         "type": "object",
-        "required": ["booking_reference", "verification_name"],
+        "required": [
+          "booking_reference",
+          "patient_name"
+        ],
         "properties": {
-          "booking_reference": { "type": "string", "pattern": "^DEMO-[0-9]{4}$" },
-          "verification_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] }
+          "booking_reference": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "The booking reference: DEMO-4812, or just its four digits."
+          },
+          "patient_name": {
+            "type": "string",
+            "maxLength": 60,
+            "description": "The person's name exactly as the caller gave or spelled it (any name; letters only)."
+          }
         }
       }
     },
     {
       "name": "reschedule_appointment",
-      "description": "Move a fictional appointment only after matching its sample reference and sample name, checking new availability, and receiving the caller's confirmation. Pass the chosen slot's start_at and provider.",
+      "description": "Move a booking to a time returned by get_availability. Returns the updated appointment.",
+      "speak_during_execution": "Sure, moving that now.",
       "parameters": {
         "type": "object",
-        "required": ["booking_reference", "verification_name", "new_start_at"],
+        "required": [
+          "booking_reference",
+          "patient_name",
+          "new_start_at"
+        ],
         "properties": {
-          "booking_reference": { "type": "string", "pattern": "^DEMO-[0-9]{4}$" },
-          "verification_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] },
-          "new_start_at": { "type": "string", "description": "The start_at value of the chosen slot from get_availability (UTC ISO-8601)." },
-          "timezone": { "type": "string", "description": "IANA clinic timezone used for get_availability. Omit for America/Chicago." },
-          "provider": { "type": "string", "enum": ["Dr. Avery Chen", "Dr. Noah Rivera"], "description": "The provider of the chosen slot from get_availability, so the booking matches what the caller was offered." }
+          "booking_reference": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "The booking reference: DEMO-4812, or just its four digits."
+          },
+          "patient_name": {
+            "type": "string",
+            "maxLength": 60,
+            "description": "The person's name exactly as the caller gave or spelled it (any name; letters only)."
+          },
+          "new_start_at": {
+            "type": "string",
+            "description": "The start_at of the chosen slot, copied exactly from get_availability."
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "Dr. Avery Chen",
+              "Dr. Noah Rivera"
+            ],
+            "description": "The provider of the chosen slot, copied from get_availability."
+          }
         }
       }
     },
     {
       "name": "cancel_appointment",
-      "description": "Cancel a fictional appointment only after matching the sample reference and sample name, then confirming the cancellation with the caller.",
+      "description": "Cancel a booking.",
+      "speak_during_execution": "Okay, cancelling that now.",
       "parameters": {
         "type": "object",
-        "required": ["booking_reference", "verification_name"],
+        "required": [
+          "booking_reference",
+          "patient_name"
+        ],
         "properties": {
-          "booking_reference": { "type": "string", "pattern": "^DEMO-[0-9]{4}$" },
-          "verification_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] }
+          "booking_reference": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "The booking reference: DEMO-4812, or just its four digits."
+          },
+          "patient_name": {
+            "type": "string",
+            "maxLength": 60,
+            "description": "The person's name exactly as the caller gave or spelled it (any name; letters only)."
+          }
         }
       }
     },
     {
       "name": "join_waitlist",
-      "description": "Add a fictional patient to the demo waitlist when no suitable time is available. Confirm the preferred date and sample name first. This creates a staff follow-up only; it does not book an appointment or send a text.",
+      "description": "Add a person to the waitlist for a visit type and preferred date. Creates a staff follow-up only; it does not book or send anything.",
       "parameters": {
         "type": "object",
-        "required": ["patient_name", "appointment_type", "preferred_date"],
+        "required": [
+          "patient_name",
+          "appointment_type",
+          "preferred_date"
+        ],
         "properties": {
-          "patient_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] },
-          "appointment_type": { "type": "string", "enum": ["New patient visit", "Follow-up visit", "Consultation", "Administrative call"] },
-          "preferred_date": { "type": "string", "description": "Preferred local clinic date in YYYY-MM-DD format." },
-          "timezone": { "type": "string", "description": "IANA clinic timezone. Omit for America/Chicago." }
+          "patient_name": {
+            "type": "string",
+            "maxLength": 60,
+            "description": "The person's name exactly as the caller gave or spelled it (any name; letters only)."
+          },
+          "appointment_type": {
+            "type": "string",
+            "enum": [
+              "New patient visit",
+              "Follow-up visit",
+              "Consultation",
+              "Administrative call"
+            ]
+          },
+          "preferred_date": {
+            "type": "string",
+            "description": "Preferred clinic date, YYYY-MM-DD, from the calendar in the prompt."
+          }
         }
-      }
-    },
-    {
-      "name": "search_approved_faq",
-      "description": "Find an approved front-desk answer. Relay only the returned answer. If handoff is true, offer a staff follow-up using suggested_request_type. If emergency is true, tell the caller to contact their local emergency number now.",
-      "parameters": {
-        "type": "object",
-        "required": ["question"],
-        "properties": { "question": { "type": "string", "maxLength": 200 } }
       }
     },
     {
       "name": "request_staff_followup",
-      "description": "Create a minimal anonymous staff task for a callback, refill request, records request, billing question, document question, accessibility or interpreter request, or unanswered FAQ. Do not include the caller's free-text details.",
+      "description": "Log a staff follow-up task. Only the request type and name are stored; never pass the caller's details or reasons.",
       "parameters": {
         "type": "object",
-        "required": ["request_type"],
-        "properties": { "request_type": { "type": "string", "enum": ["callback", "refill", "records", "billing", "documents", "faq", "accessibility"] } }
+        "required": [
+          "request_type"
+        ],
+        "properties": {
+          "request_type": {
+            "type": "string",
+            "enum": [
+              "callback",
+              "refill",
+              "records",
+              "billing",
+              "documents",
+              "faq",
+              "accessibility"
+            ],
+            "description": "callback = someone should call back (also for clinical questions); refill = prescription refill request; records = medical records request; billing = billing or insurance question; documents = help with a referral document; faq = a question with no approved answer; accessibility = accessibility or interpreter support."
+          },
+          "patient_name": {
+            "type": "string",
+            "maxLength": 60,
+            "description": "The person's name exactly as the caller gave or spelled it (any name; letters only)."
+          }
+        }
       }
     },
     {
       "name": "check_document_status",
-      "description": "Read the status of sample referral documents using a sample booking reference and sample patient name.",
+      "description": "Read the sample referral documents for a booking and their status.",
       "parameters": {
         "type": "object",
-        "required": ["booking_reference", "sample_patient_name"],
+        "required": [
+          "booking_reference"
+        ],
         "properties": {
-          "booking_reference": { "type": "string", "pattern": "^DEMO-[0-9]{4}$" },
-          "sample_patient_name": { "type": "string", "enum": ["Maya Patel", "Jordan Lee", "Samira Khan", "Alex Morgan", "Taylor Reed"] }
+          "booking_reference": {
+            "type": "string",
+            "maxLength": 40,
+            "description": "The booking reference: DEMO-4812, or just its four digits."
+          },
+          "patient_name": {
+            "type": "string",
+            "maxLength": 60,
+            "description": "The person's name exactly as the caller gave or spelled it (any name; letters only)."
+          }
         }
+      }
+    },
+    {
+      "name": "report_wrong_number",
+      "description": "Use when the person who answered did not ask for this demo call. Stops further demo calls to this number for 30 days.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
       }
     }
   ]

@@ -1,7 +1,6 @@
-// Supabase-backed storage for the shared synthetic snapshot. The Worker is the only client; the browser never
-// sees database credentials. All access goes through service-role-only RPC functions in the private schema.
-import { DomainError, createSeedState, normalizeDemoState, validateDemoState } from "../../../packages/shared/src/index.ts";
-import type { DemoSnapshot, DemoState } from "../../../packages/shared/src/index.ts";
+// Supabase access for the Worker. The Worker is the only client; the browser never sees database credentials.
+// All access goes through service-role-only RPC functions in the private schema (see supabase/migrations).
+import { DomainError } from "../../../packages/shared/src/index.ts";
 
 export interface Env {
   SUPABASE_URL?: string;
@@ -12,10 +11,16 @@ export interface Env {
   RETELL_API_KEY?: string;
   RETELL_TEST_NUMBERS?: string;
   SMS_MODE?: string;
-  /** "on" enables the public "Call me" button; anything else keeps outbound calls off. */
+  /** "on" enables public demo calls; anything else keeps them off. */
   DEMO_CALLS?: string;
+  /** "on" additionally enables browser (web) calls. Both switches must be on. */
+  DEMO_WEB_CALLS?: string;
   RETELL_FROM_NUMBER?: string;
   RETELL_AGENT_ID?: string;
+  /** Published agent version the Worker was built for (an integer). Unset means "latest_published". */
+  RETELL_AGENT_VERSION?: string;
+  /** This Worker's /webhooks/retell/events URL, sent per call so Retell reports call_started / call_ended. */
+  RETELL_EVENTS_URL?: string;
   TURNSTILE_SECRET_KEY?: string;
   TURNSTILE_HOSTNAME?: string;
   MAX_CALLS_PER_DAY?: string;
@@ -24,20 +29,26 @@ export interface Env {
   MAX_CALL_DURATION_SECONDS?: string;
 }
 
-const defaultClinicId = "harbor-health-demo";
-const encoder = new TextEncoder();
+/** The part of Cloudflare's ExecutionContext the Worker uses: work that may finish after the response is sent. */
+export interface ExecutionContextLike { waitUntil(promise: Promise<unknown>): void }
 
-export function clinicId(env: Env) {
-  return env.CLINIC_ID || defaultClinicId;
-}
+const encoder = new TextEncoder();
 
 export function configured(env: Env): env is Env & { SUPABASE_URL: string; SUPABASE_SECRET_KEY: string } {
   return Boolean(env.SUPABASE_URL && env.SUPABASE_SECRET_KEY);
 }
 
-const notConfigured = () => new DomainError(503, "backend_not_configured", "The cloud demo has not been connected yet.");
-const databaseError = () => new DomainError(502, "database_error", "The demo database could not complete that request.");
-const unreadable = () => new DomainError(502, "demo_seed_failed", "The sample schedule could not be loaded.");
+export const notConfigured = () => new DomainError(503, "backend_not_configured", "The cloud demo has not been connected yet.");
+export const databaseError = () => new DomainError(502, "database_error", "The demo database could not complete that request.");
+
+/** A refusal the client may retry later; the response carries Retry-After and retryAfterSeconds. */
+export class RetryLaterError extends DomainError {
+  readonly retryAfter: number;
+  constructor(status: number, code: string, message: string, retryAfter: number) {
+    super(status, code, message);
+    this.retryAfter = Math.max(1, Math.min(30 * 86_400, Math.ceil(retryAfter) || 60));
+  }
+}
 
 export async function rpc(env: Env, name: string, body: unknown) {
   if (!configured(env)) throw notConfigured();
@@ -59,80 +70,71 @@ export async function rpc(env: Env, name: string, body: unknown) {
   return response.json() as Promise<unknown>;
 }
 
-export async function pingDatabase(env: Env) {
-  await rpc(env, "healthcare_read_demo_state", { p_clinic_id: clinicId(env) });
-}
-
-export async function consumeRateLimit(env: Env, clientIp: string, kind: "read" | "write") {
-  // Separate buckets for reads and writes, so browsing availability or polling cannot block a booking.
-  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(`${clientIp}|${kind}`));
-  const key = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
-  const count = await rpc(env, "healthcare_consume_demo_rate_limit", { p_client_hash: key, p_window_seconds: 60 });
-  if (typeof count !== "number" || !Number.isInteger(count)) throw databaseError();
-  if (count > (kind === "read" ? 120 : 30)) throw new DomainError(429, "rate_limited", "Please wait a minute before trying again.");
-}
-
-async function readRow(env: Env) {
-  const rows = await rpc(env, "healthcare_read_demo_state", { p_clinic_id: clinicId(env) });
+/** First row of a set-returning RPC, or undefined. Anything that is not an array is a database error. */
+export async function rpcRow<T>(env: Env, name: string, body: unknown): Promise<T | undefined> {
+  const rows = await rpc(env, name, body);
   if (!Array.isArray(rows)) throw databaseError();
-  return rows[0] as { state?: unknown; revision?: unknown } | undefined;
+  return rows[0] as T | undefined;
 }
 
-export async function saveSnapshot(env: Env, expectedRevision: number, state: DemoState): Promise<DemoSnapshot> {
-  if (!validateDemoState(state)) throw new DomainError(422, "demo_data_only", "Use the built-in fictional sample data only.");
-  const result = await rpc(env, "healthcare_save_demo_state", { p_clinic_id: clinicId(env), p_expected_revision: expectedRevision, p_state: state });
-  const row = Array.isArray(result) ? result[0] as { saved?: boolean; revision?: number } | undefined : undefined;
-  if (!row?.saved) throw new DomainError(409, "demo_state_conflict", "Another demo session saved first. Please try again.");
-  const revision = Number(row.revision);
-  if (!Number.isInteger(revision) || revision !== expectedRevision + 1) throw databaseError();
-  return { state, revision };
+function hex(bytes: ArrayBuffer) {
+  return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-/** Loads the snapshot, creating the fictional seed on first use and upgrading older stored formats. */
-export async function loadSnapshot(env: Env, now = Date.now()): Promise<DemoSnapshot> {
-  if (!configured(env)) throw notConfigured();
-  let row = await readRow(env);
-  if (!row) {
-    await rpc(env, "healthcare_initialize_demo_state", { p_clinic_id: clinicId(env), p_state: createSeedState(now, env.CLINIC_TIMEZONE || undefined) });
-    row = await readRow(env);
-  }
-  const revision = Number(row?.revision);
-  if (!row || !Number.isInteger(revision) || revision < 1) throw unreadable();
-  const normalized = normalizeDemoState(row.state);
-  if (!normalized) {
-    // The store only ever holds synthetic sample data, so an unreadable snapshot is replaced with fresh samples
-    // rather than leaving the public demo broken. The revision check still prevents overwriting a newer save.
-    console.error(JSON.stringify({ event: "demo_state_invalid_reseeded", revision }));
-    return saveSnapshot(env, revision, createSeedState(now, env.CLINIC_TIMEZONE || undefined));
-  }
-  if (!normalized.migrated) return { state: normalized.state, revision };
-  try {
-    return await saveSnapshot(env, revision, normalized.state);
-  } catch (error) {
-    // Another writer may have upgraded it first; the normalized copy is still correct to serve.
-    if (error instanceof DomainError && error.status === 409) return { state: normalized.state, revision };
-    throw error;
-  }
+/** Keyed hash (HMAC-SHA256, hex) with a key derived from the server secret, so stored values cannot be reversed by guessing. */
+export async function keyedHash(env: Env, purpose: string, value: string) {
+  const key = await crypto.subtle.importKey("raw", encoder.encode(`${env.SUPABASE_SECRET_KEY ?? ""}|${purpose}`), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return hex(await crypto.subtle.sign("HMAC", key, encoder.encode(value)));
+}
+
+export async function pingDatabase(env: Env) {
+  await rpc(env, "healthcare_read_workspace", { p_workspace_id: "0".repeat(64), p_known_generation: null, p_known_revision: null });
+}
+
+function ipv6Groups(value: string) {
+  const halves = value.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  if (halves.length === 1 && head.length !== 8) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < (halves.length === 2 ? 1 : 0)) return null;
+  const groups = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  return groups.every((group) => /^[0-9a-f]{1,4}$/.test(group)) ? groups.map((group) => group.padStart(4, "0")) : null;
 }
 
 /**
- * Applies a change with optimistic concurrency. The change function runs against the latest snapshot; when it
- * reports changed=false (for example, an idempotent replay) nothing is written, so the revision does not churn.
+ * The identity used for every per-client limit: the full IPv4 address, or the /64 prefix of an IPv6 address
+ * (one home or phone connection usually owns a whole /64, so per-address limits would be trivial to dodge).
  */
-export async function mutateSnapshot<T>(env: Env, change: (state: DemoState) => { state: DemoState; changed: boolean; value: T }): Promise<{ snapshot: DemoSnapshot; value: T }> {
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const current = await loadSnapshot(env);
-    const result = change(current.state);
-    if (!result.changed) return { snapshot: current, value: result.value };
-    try {
-      return { snapshot: await saveSnapshot(env, current.revision, result.state), value: result.value };
-    } catch (error) {
-      if (!(error instanceof DomainError) || error.status !== 409 || error.code !== "demo_state_conflict" || attempt === 3) throw error;
-    }
-  }
-  throw new DomainError(409, "demo_state_conflict", "Please try the sample request again.");
+export function clientKey(ip: string) {
+  const value = ip.trim().toLowerCase().replace(/%.*$/, "");
+  if (!value.includes(":")) return value || "local";
+  const mapped = /^(?:0{0,4}:){0,4}:?(?:0{0,4}:)?ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(value);
+  if (mapped) return mapped[1];
+  const groups = ipv6Groups(value);
+  return groups ? `${groups.slice(0, 4).join(":")}::/64` : value;
 }
 
-export async function recordCallEvent(env: Env, callId: string, event: string) {
-  await rpc(env, "healthcare_record_retell_call_event", { p_call_id: callId, p_event: event });
+/**
+ * Counts one request against a per-client window and refuses it beyond `max`. Separate buckets keep reads, writes
+ * and new workspaces apart, so browsing availability or polling cannot block a booking.
+ */
+export async function consumeLimit(env: Env, client: string, bucket: string, windowSeconds: number, max: number, refuse: () => DomainError) {
+  const key = await keyedHash(env, "rate-limit", `${client}|${bucket}`);
+  const count = await rpc(env, "healthcare_consume_demo_rate_limit", { p_client_hash: key, p_window_seconds: windowSeconds });
+  if (typeof count !== "number" || !Number.isInteger(count)) throw databaseError();
+  if (count > max) throw refuse();
+}
+
+export function consumeRateLimit(env: Env, client: string, kind: "read" | "write") {
+  return consumeLimit(env, client, kind, 60, kind === "read" ? 120 : 30,
+    () => new RetryLaterError(429, "rate_limited", "Please wait a minute before trying again.", 60));
+}
+
+/** Runs work after the response when the runtime allows it (Cloudflare's waitUntil); otherwise waits for it. */
+export async function afterResponse(context: ExecutionContextLike | undefined, work: Promise<unknown>) {
+  const safe = work.catch(() => undefined);
+  if (context) context.waitUntil(safe);
+  else await safe;
 }

@@ -1,250 +1,315 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { apiVersion, fetchHandler, processDemoReminders } from "../src/app.ts";
+import { apiVersion, fetchHandler } from "../src/app.ts";
 import type { Env } from "../src/app.ts";
-import { verifyRetellSignature } from "../src/retell.ts";
-import { createSeedState } from "../../../packages/shared/src/index.ts";
+import worker from "../src/index.ts";
+import { clientKey } from "../src/store.ts";
+import { checkStorable, storedJsonBytes } from "../src/workspaces.ts";
+import { DomainError, createSeedState, validateDemoState } from "../../../packages/shared/src/index.ts";
 import type { DemoState } from "../../../packages/shared/src/index.ts";
+import { FakeSupabase, SUPABASE_URL, installFetch, newVisitor, nextWeekday } from "./harness.ts";
 
-// In-memory stand-in for the five Supabase RPC functions in supabase/migrations.
-interface FakeDb { row: { state: unknown; revision: number } | null; saves: number; rateCount: number; callEvents: Set<string> }
-let db: FakeDb;
-const realFetch = globalThis.fetch;
-const SUPABASE_URL = "https://example-project.supabase.co";
-const API_KEY = "test-retell-key";
-const TEST_NUMBER = "+15550100";
-const env: Env = { SUPABASE_URL, SUPABASE_SECRET_KEY: "sb_secret_test", PUBLIC_ORIGINS: "https://demo.example", RETELL_API_KEY: API_KEY, RETELL_TEST_NUMBERS: TEST_NUMBER };
+let db: FakeSupabase;
+let restore: () => void;
+const env: Env = { SUPABASE_URL, SUPABASE_SECRET_KEY: "sb_secret_test", PUBLIC_ORIGINS: "https://demo.example", RETELL_API_KEY: "test-retell-key" };
+const origin = "https://demo.example";
 
-function fakeSupabase(input: RequestInfo | URL, init?: RequestInit) {
-  const url = new URL(String(input instanceof Request ? input.url : input));
-  assert.equal(url.origin, SUPABASE_URL, "only Supabase is called");
-  const name = url.pathname.replace("/rest/v1/rpc/", "");
-  const body = JSON.parse(String(init?.body ?? "{}"));
-  const json = (value: unknown) => Promise.resolve(new Response(JSON.stringify(value), { status: 200 }));
-  switch (name) {
-    case "healthcare_read_demo_state": return json(db.row ? [db.row] : []);
-    case "healthcare_initialize_demo_state": if (!db.row) db.row = { state: body.p_state, revision: 1 }; return json(true);
-    case "healthcare_save_demo_state":
-      if (!db.row || db.row.revision !== body.p_expected_revision) return json([{ saved: false, revision: body.p_expected_revision }]);
-      db.row = { state: body.p_state, revision: db.row.revision + 1 };
-      db.saves += 1;
-      return json([{ saved: true, revision: db.row.revision }]);
-    case "healthcare_consume_demo_rate_limit": db.rateCount += 1; return json(db.rateCount);
-    case "healthcare_record_retell_call_event": db.callEvents.add(`${body.p_call_id}:${body.p_event}`); return json(true);
-    default: return Promise.resolve(new Response("{}", { status: 404 }));
-  }
+beforeEach(() => { db = new FakeSupabase(); restore = installFetch(db); });
+afterEach(() => restore());
+
+function call(path: string, init: RequestInit & { visitor?: string | null; ip?: string } = {}) {
+  const { visitor, ip, ...rest } = init;
+  const headers = new Headers(rest.headers);
+  if (!headers.has("Origin")) headers.set("Origin", origin);
+  if (visitor) headers.set("X-Demo-Visitor", visitor);
+  if (ip) headers.set("CF-Connecting-IP", ip);
+  return fetchHandler(new Request(`https://worker.example${path}`, { ...rest, headers }), env);
 }
-
-beforeEach(() => {
-  db = { row: null, saves: 0, rateCount: 0, callEvents: new Set() };
-  globalThis.fetch = fakeSupabase as typeof fetch;
-});
-afterEach(() => { globalThis.fetch = realFetch; });
-
-const origin = { Origin: "https://demo.example" };
-const call = (path: string, init: RequestInit = {}) => fetchHandler(new Request(`https://worker.example${path}`, init), env);
-const post = (path: string, body: unknown, headers: Record<string, string> = origin) => call(path, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
-const state = () => (db.row!.state as DemoState);
+const get = (path: string, visitor: string | null, ip?: string) => call(path, { visitor, ip });
+const post = (path: string, body: unknown, visitor: string | null, ip?: string) => call(path, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json" }, visitor, ip });
+const bodyOf = async (response: Response) => await response.json() as Record<string, any>;
 let keyCounter = 0;
 const newKey = () => `test-${Date.now()}-${(keyCounter += 1)}`;
+const task = (requestType: string) => ({ idempotencyKey: newKey(), action: { type: "create_task", requestType } });
+const workspaceIds = () => [...db.workspaces.keys()];
 
-async function sign(raw: string, timestamp = Date.now()) {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(API_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(raw + timestamp)));
-  return `v=${timestamp},d=${[...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
-async function retell(name: string, args: Record<string, unknown>, options: { callId?: string; from?: string; signed?: boolean } = {}) {
-  const raw = JSON.stringify({ name, args, call: { call_id: options.callId ?? "call_test_1", from_number: options.from ?? TEST_NUMBER, transcript: "Caller: (sample)" } });
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (options.signed !== false) headers["X-Retell-Signature"] = await sign(raw);
-  const response = await call("/webhooks/retell/custom-function", { method: "POST", headers, body: raw });
-  return { status: response.status, body: await response.json() as Record<string, any> };
-}
-
-function nextWeekday() {
-  const date = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-  while ([0, 6].includes(date.getUTCDay())) date.setUTCDate(date.getUTCDate() + 1);
-  return date.toISOString().slice(0, 10);
-}
-
-describe("public API", () => {
-  it("reports health without enabling live channels", async () => {
-    const body = await (await call("/api/health")).json() as Record<string, unknown>;
-    assert.deepEqual({ ok: body.ok, apiVersion: body.apiVersion, db: body.databaseConnected, calls: body.liveCallsEnabled, sms: body.liveSmsEnabled }, { ok: true, apiVersion, db: true, calls: false, sms: false });
+describe("public API v3", () => {
+  it("reports health with API v3, the private demo retention and calls off", async () => {
+    const body = await bodyOf(await get("/api/health", null));
+    assert.deepEqual(
+      { ok: body.ok, apiVersion: body.apiVersion, db: body.databaseConnected, calls: body.liveCallsEnabled, sms: body.liveSmsEnabled, demoCalls: body.demoCalls, privateDemo: body.privateDemo },
+      { ok: true, apiVersion: 3, db: true, calls: false, sms: false, demoCalls: { enabled: false, web: { enabled: false } }, privateDemo: { retentionDays: 7 } },
+    );
+    assert.equal(apiVersion, 3);
   });
 
-  it("seeds once and does not write on plain reads", async () => {
-    const first = await (await call("/api/demo/state", { headers: origin })).json() as { revision: number };
-    const second = await (await call("/api/demo/state", { headers: origin })).json() as { revision: number };
-    assert.equal(first.revision, 1);
-    assert.equal(second.revision, 1);
-    assert.equal(db.saves, 0);
+  it("asks old tabs without a visitor key to reload, and rejects malformed keys", async () => {
+    const missing = await get("/api/demo/state", null);
+    assert.equal(missing.status, 409);
+    assert.equal((await bodyOf(missing)).error.code, "reload_required");
+    for (const path of ["/api/demo/actions", "/api/demo/forget", "/api/demo-call", "/api/demo-web-call", "/api/demo-call/release"]) {
+      assert.equal((await bodyOf(await post(path, {}, null))).error.code, "reload_required", path);
+    }
+    assert.equal((await bodyOf(await get("/api/demo-call/status?ref=x", null))).error.code, "reload_required");
+    const malformed = await get("/api/demo/state", "short-key");
+    assert.deepEqual([malformed.status, (await bodyOf(malformed)).error.code], [400, "invalid_visitor"]);
+    assert.equal(db.rpcLog.length, 0, "nothing reaches the database");
+  });
+
+  it("allows the visitor header in CORS and keeps the Origin check", async () => {
+    const preflight = await call("/api/demo/state", { method: "OPTIONS" });
+    assert.equal(preflight.status, 204);
+    assert.match(preflight.headers.get("Access-Control-Allow-Headers") ?? "", /X-Demo-Visitor/);
+    assert.equal(preflight.headers.get("Access-Control-Allow-Origin"), origin);
+    const evil = await call("/api/demo/state", { visitor: newVisitor(), headers: { Origin: "https://evil.example" } });
+    assert.equal(evil.status, 403);
+    assert.equal((await call("/api/demo/state", { method: "OPTIONS", headers: { Origin: "https://evil.example" } })).status, 403);
+  });
+
+  it("keeps the whole-state write route retired", async () => {
+    assert.equal((await call("/api/demo/state", { method: "PUT", body: "{}", visitor: newVisitor() })).status, 410);
+  });
+
+  it("never calls the retired shared-snapshot functions", async () => {
+    const visitor = newVisitor();
+    await get("/api/demo/state", visitor);
+    await post("/api/demo/actions", task("callback"), visitor);
+    await get("/api/health", null);
+    assert.ok(db.rpcLog.every((name) => !/demo_state|initialize|record_retell_call_event$|reserve_demo_call$|finish_demo_call$/.test(name)), db.rpcLog.join(","));
+  });
+});
+
+describe("private workspaces", () => {
+  it("serves a fresh seed to a new visitor without writing anything", async () => {
+    const body = await bodyOf(await get("/api/demo/state", newVisitor()));
+    assert.deepEqual([body.revision, body.generation, body.persisted], [0, 0, false]);
+    assert.equal(body.state.appointments.length, 5);
+    const slots = await bodyOf(await post("/api/appointments/availability", { date: nextWeekday(), appointmentType: "Consultation", timezone: "America/Chicago" }, newVisitor()));
+    assert.ok(slots.slots.length > 0);
+    assert.equal(db.workspaces.size, 0);
+    assert.ok(!db.rpcLog.some((name) => /create_workspace|save_workspace/.test(name)));
+  });
+
+  it("does not create a workspace for an invalid or no-op change", async () => {
+    const visitor = newVisitor();
+    const invalid = await post("/api/demo/actions", { idempotencyKey: newKey(), action: { type: "book_appointment", patient: "Someone New", appointmentType: "Consultation", startAt: `${nextWeekday()}T15:00:00.000Z`, timezone: "America/Chicago" } }, visitor);
+    assert.equal((await bodyOf(invalid)).error.code, "unknown_patient", "console actions cannot introduce new names");
+    const noop = await bodyOf(await post("/api/demo/actions", { idempotencyKey: newKey(), action: { type: "set_sms_preference", patient: "Maya Patel", optedOut: false } }, visitor));
+    assert.deepEqual([noop.result.changed, noop.persisted, noop.revision], [false, false, 0]);
+    assert.equal(db.workspaces.size, 0);
+  });
+
+  it("creates the workspace on the first change, then saves revisions", async () => {
+    const visitor = newVisitor();
+    const first = await bodyOf(await post("/api/demo/actions", task("callback"), visitor));
+    assert.deepEqual([first.result.changed, first.persisted, first.revision], [true, true, 2], "seed is revision 1, the change revision 2");
+    assert.ok(first.generation > 0);
+    const read = await bodyOf(await get("/api/demo/state", visitor));
+    assert.deepEqual([read.revision, read.generation, read.persisted], [2, first.generation, true]);
+    assert.ok(read.state.tasks.some((item: { title: string; patient: string }) => item.title === "Call back requested" && item.patient === "Front desk"));
+  });
+
+  it("keeps two visitors' demos apart", async () => {
+    const [alice, bob] = [newVisitor(), newVisitor()];
+    const request = task("billing");
+    await post("/api/demo/actions", request, alice);
+    const bobView = await bodyOf(await get("/api/demo/state", bob));
+    assert.equal(bobView.persisted, false);
+    assert.equal(bobView.state.tasks.filter((item: { title: string }) => item.title === "Billing question").length, 1, "only the seed's task");
+    // The same idempotency key in another workspace is a separate request.
+    const bobChange = await bodyOf(await post("/api/demo/actions", request, bob));
+    assert.equal(bobChange.result.changed, true);
+    assert.equal(db.workspaces.size, 2);
+    const [a, b] = workspaceIds();
+    assert.notEqual(a, b);
+    assert.match(a, /^[a-f0-9]{64}$/);
+    assert.ok(!JSON.stringify([...db.workspaces.keys()]).includes(alice.slice(0, 20)), "the raw key is never stored");
+  });
+
+  it("does not lose either of two concurrent first writes", async () => {
+    const visitor = newVisitor();
+    db.gate("healthcare_read_workspace", 2);
+    db.gate("healthcare_save_workspace", 2);
+    const [one, two] = await Promise.all([post("/api/demo/actions", task("callback"), visitor), post("/api/demo/actions", task("records"), visitor)]);
+    assert.deepEqual([one.status, two.status], [200, 200]);
+    const state = (await bodyOf(await get("/api/demo/state", visitor))).state as DemoState;
+    assert.ok(state.tasks.some((item) => item.title === "Call back requested"));
+    assert.ok(state.tasks.some((item) => item.title === "Records request"));
+    const [id] = workspaceIds();
+    assert.equal(db.workspace(id)!.revision, 3);
+    assert.equal(db.savesFor(id), 3, "one save conflicted and was retried");
+  });
+
+  it("(f) keeps an unsaved seed: known=0.0 is unchanged until the first change is stored", async () => {
+    const visitor = newVisitor();
+    assert.deepEqual(await bodyOf(await get("/api/demo/state?known=0.0", visitor)), { unchanged: true, revision: 0, generation: 0 });
+    const first = await bodyOf(await post("/api/demo/actions", task("callback"), visitor));
+    const stored = await bodyOf(await get("/api/demo/state?known=0.0", visitor));
+    assert.deepEqual([stored.revision, stored.generation, stored.persisted], [first.revision, first.generation, true]);
+    assert.ok(stored.state, "once stored, the browser gets the real copy");
+    assert.equal(db.workspaces.size, 1);
+  });
+
+  it("answers conditional reads without the state when nothing changed", async () => {
+    const visitor = newVisitor();
+    const first = await bodyOf(await post("/api/demo/actions", task("callback"), visitor));
+    const unchanged = await bodyOf(await get(`/api/demo/state?known=${first.generation}.${first.revision}`, visitor));
+    assert.deepEqual(unchanged, { unchanged: true, revision: first.revision, generation: first.generation });
+    await post("/api/demo/actions", task("records"), visitor);
+    const changed = await bodyOf(await get(`/api/demo/state?known=${first.generation}.${first.revision}`, visitor));
+    assert.equal(changed.revision, first.revision + 1);
+    assert.ok(changed.state);
+    const otherGeneration = await bodyOf(await get(`/api/demo/state?known=1.${first.revision + 1}`, visitor));
+    assert.ok(otherGeneration.state, "a different generation gets the full state");
+  });
+
+  it("runs the reminder simulation in memory on reads, without writing", async () => {
+    const visitor = newVisitor();
+    await post("/api/demo/actions", task("callback"), visitor);
+    const [id] = workspaceIds();
+    const row = db.workspace(id)!;
+    const stored = row.state as DemoState;
+    // Make every scheduled text due.
+    row.state = { ...stored, messages: stored.messages.map((item) => item.scheduledFor ? { ...item, scheduledFor: new Date(Date.now() - 60_000).toISOString() } : item) };
+    const saves = db.savesFor(id);
+    const read = (await bodyOf(await get("/api/demo/state", visitor))).state as DemoState;
+    assert.ok(read.messages.every((item) => item.status !== "Scheduled (demo)"));
+    assert.equal(db.savesFor(id), saves);
+  });
+
+  it("serves an unreadable stored copy as a fresh seed and replaces it on the next change", async () => {
+    const visitor = newVisitor();
+    await post("/api/demo/actions", task("callback"), visitor);
+    const [id] = workspaceIds();
+    db.workspace(id)!.state = { appointments: [{ patient: "Real Person" }], tasks: [], referrals: [], messages: [] };
+    const read = await bodyOf(await get("/api/demo/state", visitor));
+    assert.equal(read.persisted, true);
+    assert.ok((read.state as DemoState).appointments.every((item) => item.patient !== "Real Person"));
+    await post("/api/demo/actions", task("records"), visitor);
+    assert.ok((db.workspace(id)!.state as DemoState).appointments.every((item) => item.patient !== "Real Person"));
+  });
+
+  it("refuses a valid state that would exceed the stored size limit before writing", () => {
+    // Every list at its limit, with the longest allowed names and message bodies.
+    const name = "Abcdefghijk Abcdefghijk Abcdefghijk Abcdefghijk Abcdefghijkl";
+    const at = new Date(Date.now() + 86_400_000).toISOString();
+    const seed = createSeedState();
+    const body = `Reminder for your sample appointment at ${"Thursday October 8 at 9:30 AM ".repeat(13)} (America / Chicago). This text is not sent.`;
+    const state: DemoState = {
+      ...seed,
+      messages: Array.from({ length: 120 }, (_, i) => ({ id: `msg-big-${i}`, recipient: `${name} · DEMO-${1000 + i}`, purpose: "24-hour appointment reminder", body, sentAt: at, scheduledFor: at, appointmentReference: `DEMO-${1000 + i}`, status: "Scheduled (demo)" as const })),
+      tasks: Array.from({ length: 60 }, (_, i) => ({ id: `task-big-${i}`, title: "Accessibility or interpreter request", patient: name, detail: "Caller asked for accessibility or interpreter support. Staff will confirm the arrangements.", dueAt: at, priority: "Today" as const, status: "Open" as const, appointmentReference: `DEMO-${2000 + i}` })),
+      events: Array.from({ length: 60 }, (_, i) => ({ id: `evt-big-${i}`, at, action: "Staff task created" as const, channel: "Voice assistant" as const, patient: name, reference: `DEMO-${3000 + i}`, taskId: `task-big-${i}` })),
+      referrals: Array.from({ length: 60 }, (_, i) => ({ id: `doc-big-${i}`, patient: name, reference: `DEMO-${4000 + i}`, appointment: "Consultation", document: "Referral document · sample needed", status: "Needed" as const })),
+    };
+    assert.ok(validateDemoState(state), "the state itself is valid");
+    assert.ok(storedJsonBytes(state) > 128 * 1024);
+    assert.throws(() => checkStorable(state), (error: unknown) => error instanceof DomainError && error.code === "demo_full" && error.status === 409);
+    assert.doesNotThrow(() => checkStorable(seed));
+  });
+
+  it("deletes the demo on forget, and starts a new generation afterwards", async () => {
+    const visitor = newVisitor();
+    const first = await bodyOf(await post("/api/demo/actions", task("callback"), visitor));
+    const forgotten = await post("/api/demo/forget", {}, visitor);
+    assert.deepEqual(await bodyOf(forgotten), { deleted: true });
+    assert.equal(db.workspaces.size, 0);
+    const after = await bodyOf(await get("/api/demo/state", visitor));
+    assert.deepEqual([after.persisted, after.revision], [false, 0]);
+    const again = await bodyOf(await post("/api/demo/actions", task("callback"), visitor));
+    assert.notEqual(again.generation, first.generation);
+  });
+
+  it("limits new workspaces to 6 per client per hour, keyed by the IPv6 /64", async () => {
+    for (let i = 0; i < 6; i += 1) {
+      assert.equal((await post("/api/demo/actions", task("callback"), newVisitor(), `2001:db8:1:2::${i + 1}`)).status, 200);
+    }
+    const refused = await post("/api/demo/actions", task("callback"), newVisitor(), "2001:db8:1:2:ffff:ffff:ffff:ffff");
+    assert.equal(refused.status, 429);
+    assert.equal((await bodyOf(refused)).error.code, "demo_busy_creation");
+    assert.ok(Number(refused.headers.get("Retry-After")) > 0);
+    assert.equal((await post("/api/demo/actions", task("callback"), newVisitor(), "2001:db8:1:3::1")).status, 200, "another /64 is another client");
+    assert.equal((await get("/api/demo/state", newVisitor(), "2001:db8:1:2::99")).status, 200, "reads are not limited by creation");
+  });
+
+  it("evicts the least recently used demo without calls at the cap, and refuses when none can go", async () => {
+    // Fill to the cap cheaply: the fake trusts the same caps the Worker passes (3,000 rows).
+    for (let i = 0; i < 2999; i += 1) db.workspaces.set(i.toString(16).padStart(64, "0"), { state: {}, revision: 1, createdAt: i + 1, lastUsedAt: i + 1, hadCall: i !== 0, bytes: 2 });
+    assert.equal((await post("/api/demo/actions", task("callback"), newVisitor(), "198.51.100.1")).status, 200);
+    assert.equal(db.workspaces.size, 3000);
+    assert.equal((await post("/api/demo/actions", task("callback"), newVisitor(), "198.51.100.2")).status, 200, "evicts the only demo that never had a call");
+    assert.ok(!db.workspaces.has("0".repeat(64)));
+    for (const row of db.workspaces.values()) row.hadCall = true;
+    const busy = await post("/api/demo/actions", task("callback"), newVisitor(), "198.51.100.3");
+    assert.deepEqual([busy.status, (await bodyOf(busy)).error.code], [503, "demo_busy"]);
+  });
+
+  it("keeps per-client read and write rate limits", async () => {
+    db.rateBoost = 1000;
+    const response = await post("/api/demo/actions", task("callback"), newVisitor());
+    assert.equal(response.status, 429);
+    assert.equal((await bodyOf(response)).error.code, "rate_limited");
   });
 
   it("books through the action route and treats a retry as the same booking", async () => {
-    const date = nextWeekday();
-    const slots = await (await post("/api/appointments/availability", { date, appointmentType: "Follow-up visit", timezone: "America/Chicago" })).json() as { slots: Array<{ startAt: string }> };
-    assert.ok(slots.slots.length > 0);
+    const visitor = newVisitor();
+    const slots = await bodyOf(await post("/api/appointments/availability", { date: nextWeekday(), appointmentType: "Follow-up visit", timezone: "America/Chicago" }, visitor));
     const request = { idempotencyKey: newKey(), action: { type: "book_appointment", patient: "Taylor Reed", appointmentType: "Follow-up visit", startAt: slots.slots[0].startAt, timezone: "America/Chicago" } };
-    const first = await (await post("/api/demo/actions", request)).json() as Record<string, any>;
+    const first = await bodyOf(await post("/api/demo/actions", request, visitor));
     assert.equal(first.result.changed, true);
-    const savesAfterFirst = db.saves;
-    const replay = await (await post("/api/demo/actions", request)).json() as Record<string, any>;
+    const [id] = workspaceIds();
+    const saves = db.savesFor(id);
+    const replay = await bodyOf(await post("/api/demo/actions", request, visitor));
     assert.equal(replay.result.changed, false);
     assert.equal(replay.result.appointment.reference, first.result.appointment.reference);
-    assert.equal(db.saves, savesAfterFirst, "a replay does not write");
+    assert.equal(db.savesFor(id), saves, "a replay does not write");
   });
 
-  it("returns a clear conflict instead of a false confirmation", async () => {
-    await call("/api/demo/state", { headers: origin });
-    const taken = state().appointments.find((item) => item.reference === "DEMO-4812")!;
-    const response = await post("/api/demo/actions", { idempotencyKey: newKey(), action: { type: "book_appointment", patient: "Jordan Lee", appointmentType: "New patient visit", startAt: taken.startAt, timezone: "America/Chicago" } });
-    // The other provider is still free at that time, so book the second provider first, then expect a refusal.
-    if (response.status === 200) {
-      const again = await post("/api/demo/actions", { idempotencyKey: newKey(), action: { type: "book_appointment", patient: "Samira Khan", appointmentType: "New patient visit", startAt: taken.startAt, timezone: "America/Chicago" } });
-      assert.equal(again.status, 409);
-      assert.equal((await again.json() as Record<string, any>).error.code, "slot_unavailable");
-    } else {
-      assert.equal(response.status, 409);
-    }
-  });
-
-  it("rejects malformed, unauthorised, and retired requests", async () => {
-    assert.equal((await post("/api/demo/actions", { idempotencyKey: newKey(), action: { type: "create_task", requestType: "callback", note: "free text" } })).status, 400);
-    assert.equal((await post("/api/demo/actions", { action: { type: "create_task", requestType: "callback" } })).status, 400);
-    assert.equal((await post("/api/demo/actions", { idempotencyKey: newKey(), action: { type: "create_task", requestType: "callback" } }, { Origin: "https://evil.example" })).status, 403);
-    assert.equal((await call("/api/demo/state", { method: "PUT", headers: origin, body: "{}" })).status, 410);
-    db.rateCount = 1000;
-    assert.equal((await post("/api/demo/actions", { idempotencyKey: newKey(), action: { type: "create_task", requestType: "callback" } })).status, 429);
-  });
-
-  it("upgrades a snapshot stored by the previous Worker exactly once", async () => {
-    const legacy = createSeedState() as Partial<DemoState>;
-    delete legacy.events;
-    delete legacy.smsPreferences;
-    db.row = { state: legacy, revision: 7 };
-    const body = await (await call("/api/demo/state", { headers: origin })).json() as { revision: number; state: DemoState };
-    assert.equal(body.revision, 8);
-    assert.ok(Array.isArray(body.state.events) && body.state.smsPreferences.length === 5);
-    await call("/api/demo/state", { headers: origin });
-    assert.equal(db.saves, 1);
+  it("rejects malformed requests", async () => {
+    const visitor = newVisitor();
+    assert.equal((await post("/api/demo/actions", { idempotencyKey: newKey(), action: { type: "create_task", requestType: "callback", note: "free text" } }, visitor)).status, 400);
+    assert.equal((await post("/api/demo/actions", { action: { type: "create_task", requestType: "callback" } }, visitor)).status, 400);
   });
 });
 
-describe("stored data recovery", () => {
-  it("replaces an unreadable snapshot with fresh sample data instead of failing", async () => {
-    db.row = { state: { appointments: [{ patient: "Real Person" }], tasks: [], referrals: [], messages: [] }, revision: 3 };
-    const response = await call("/api/demo/state", { headers: origin });
-    assert.equal(response.status, 200);
-    const body = await response.json() as { revision: number; state: DemoState };
-    assert.equal(body.revision, 4);
-    assert.ok(body.state.appointments.every((item) => item.patient !== "Real Person"));
+describe("client identity", () => {
+  it("uses the full IPv4 address and the /64 prefix of IPv6 addresses", () => {
+    assert.equal(clientKey("203.0.113.7"), "203.0.113.7");
+    assert.equal(clientKey("2001:db8:85a3:8d3:1319:8a2e:370:7348"), "2001:0db8:85a3:08d3::/64");
+    assert.equal(clientKey("2001:DB8:85A3:8D3::1"), "2001:0db8:85a3:08d3::/64");
+    assert.equal(clientKey("2001:db8::1"), "2001:0db8:0000:0000::/64");
+    assert.equal(clientKey("::1"), "0000:0000:0000:0000::/64");
+    assert.equal(clientKey("::ffff:198.51.100.4"), "198.51.100.4");
+    assert.equal(clientKey("fe80::1%eth0"), "fe80:0000:0000:0000::/64");
+    assert.equal(clientKey(""), "local");
   });
 });
 
-describe("Retell custom functions", () => {
-  it("verifies signatures exactly like the Retell SDK", async () => {
-    const raw = "{\"a\":1}";
-    assert.equal(await verifyRetellSignature(raw, await sign(raw), API_KEY), true);
-    assert.equal(await verifyRetellSignature(raw + " ", await sign(raw), API_KEY), false);
-    assert.equal(await verifyRetellSignature(raw, await sign(raw, Date.now() - 10 * 60 * 1000), API_KEY), false);
+describe("retention job", () => {
+  it("purges through the scheduled handler: old demos, old events, call links and phone hashes", async () => {
+    const [stale, fresh] = [newVisitor(), newVisitor()];
+    await post("/api/demo/actions", task("callback"), stale);
+    const [staleId] = workspaceIds();
+    await post("/api/demo/actions", task("callback"), fresh);
+    db.workspace(staleId)!.lastUsedAt = Date.now() - 8 * 86_400_000;
+    db.events.set("call_old|call_ended", { callId: "call_old", event: "call_ended", detail: "user_hangup", occurredAt: null, receivedAt: Date.now() - 31 * 86_400_000 });
+    db.calls.push({
+      id: crypto.randomUUID(), channel: "phone", workspaceId: staleId, phoneHash: "a".repeat(64), ipHash: "b".repeat(64), owner: false, status: "placed",
+      retellCallId: "call_x", createdAt: Date.now() - 25 * 3_600_000, suppressedUntil: null, toolLog: [], statusCheckedAt: null,
+    });
+    const pending: Promise<unknown>[] = [];
+    worker.scheduled({ cron: "*/15 * * * *" }, env, { waitUntil: (promise) => { pending.push(promise); } });
+    await Promise.all(pending);
+    assert.deepEqual([...db.workspaces.keys()].length, 1);
+    assert.ok(!db.workspaces.has(staleId));
+    assert.equal(db.events.size, 0);
+    assert.deepEqual([db.calls[0].workspaceId, db.calls[0].phoneHash], [null, null]);
+    assert.ok(!db.rpcLog.some((name) => name.startsWith("healthcare_save_workspace") && db.rpcLog.indexOf(name) > db.rpcLog.indexOf("healthcare_purge_demo_data")), "the cron no longer simulates reminders");
   });
 
-  it("rejects unsigned requests and callers outside the allowlist", async () => {
-    assert.equal((await retell("get_availability", { date: nextWeekday(), appointment_type: "Consultation" }, { signed: false })).status, 401);
-    assert.equal((await retell("get_availability", { date: nextWeekday(), appointment_type: "Consultation" }, { from: "+15550199" })).status, 403);
-    const closed = await fetchHandler(new Request("https://worker.example/webhooks/retell/custom-function", { method: "POST", body: "{}" }), { ...env, RETELL_TEST_NUMBERS: "" });
-    assert.equal(closed.status, 401);
-  });
-
-  it("runs a full booking conversation without duplicates", async () => {
-    const date = nextWeekday();
-    const availability = await retell("get_availability", { date, appointment_type: "Consultation" });
-    assert.equal(availability.status, 200);
-    assert.equal(availability.body.timezone, "America/Chicago", "defaults to the clinic timezone");
-    const slot = availability.body.slots[0];
-    assert.match(slot.local_time, /\d{1,2}:\d{2} (AM|PM)$/);
-
-    const args = { patient_name: "Jordan Lee", appointment_type: "Consultation", start_at: slot.start_at, timezone: "America/Chicago" };
-    const booked = await retell("create_appointment", args, { callId: "call_booking" });
-    assert.equal(booked.body.success, true);
-    const repeated = await retell("create_appointment", args, { callId: "call_booking" });
-    assert.equal(repeated.body.reference, booked.body.reference);
-    assert.equal(state().appointments.filter((item) => item.reference === booked.body.reference).length, 1);
-
-    const lookup = await retell("lookup_appointment", { booking_reference: booked.body.reference, verification_name: "Jordan Lee" });
-    assert.equal(lookup.body.appointment.local_time, slot.local_time);
-    const docs = await retell("check_document_status", { booking_reference: booked.body.reference, sample_patient_name: "Jordan Lee" });
-    assert.equal(docs.body.documents[0].status, "Needed");
-    const cancelled = await retell("cancel_appointment", { booking_reference: booked.body.reference, verification_name: "Jordan Lee" }, { callId: "call_booking" });
-    assert.equal(cancelled.body.appointment.status, "Cancelled");
-  });
-
-  it("treats differently formatted repeats as one booking, and a rebook after cancelling as new", async () => {
-    const availability = await retell("get_availability", { date: nextWeekday(), appointment_type: "Follow-up visit" });
-    const slot = availability.body.slots[1];
-    const first = await retell("create_appointment", { patient_name: "Samira Khan", appointment_type: "Follow-up visit", start_at: slot.start_at }, { callId: "call_format" });
-    const reformatted = await retell("create_appointment", { patient_name: "Samira Khan", appointment_type: "Follow-up visit", start_at: slot.start_at.replace(".000Z", "Z"), timezone: "America/Chicago" }, { callId: "call_format" });
-    assert.equal(reformatted.body.reference, first.body.reference);
-    await retell("cancel_appointment", { booking_reference: first.body.reference, verification_name: "Samira Khan" }, { callId: "call_format" });
-    const rebooked = await retell("create_appointment", { patient_name: "Samira Khan", appointment_type: "Follow-up visit", start_at: slot.start_at }, { callId: "call_format" });
-    assert.equal(rebooked.body.success, true);
-    assert.notEqual(rebooked.body.reference, first.body.reference);
-    assert.equal(rebooked.body.appointment.status, "Confirmed");
-  });
-
-  it("returns business failures as success=false so the agent can respond", async () => {
-    const wrongName = await retell("lookup_appointment", { booking_reference: "DEMO-4812", verification_name: "Jordan Lee" });
-    assert.deepEqual([wrongName.status, wrongName.body.success, wrongName.body.error], [200, false, "sample_booking_not_found"]);
-    const offGrid = await retell("create_appointment", { patient_name: "Maya Patel", appointment_type: "Consultation", start_at: `${nextWeekday()}T03:07:00.000Z` });
-    assert.deepEqual([offGrid.status, offGrid.body.success, offGrid.body.error], [200, false, "slot_unavailable"]);
-    const unknown = await retell("delete_everything", {});
-    assert.equal(unknown.body.error, "unknown_function");
-  });
-
-  it("creates one anonymous staff task per request type per call", async () => {
-    await retell("request_staff_followup", { request_type: "accessibility" }, { callId: "call_tasks" });
-    await retell("request_staff_followup", { request_type: "accessibility" }, { callId: "call_tasks" });
-    const tasks = state().tasks.filter((item) => item.title === "Accessibility or interpreter request");
-    assert.equal(tasks.length, 1);
-    assert.equal(tasks[0].patient, "Front desk");
-    assert.equal((await retell("request_staff_followup", { request_type: "faq_review" })).body.error, "invalid_request_type");
-  });
-
-  it("routes refill questions to staff and medical questions to the safety answer", async () => {
-    const refill = await retell("search_approved_faq", { question: "Can you refill my prescription?" });
-    assert.deepEqual([refill.body.handoff, refill.body.suggested_request_type], [true, "refill"]);
-    const clinical = await retell("search_approved_faq", { question: "Is this rash serious?" });
-    assert.match(clinical.body.answer, /cannot answer medical questions/);
-  });
-
-  it("trusts outbound demo calls this Worker started, and nothing else from other numbers", async () => {
-    const agentEnv = { ...env, RETELL_AGENT_ID: "agent_bcd0e610f4535270f5642efeb0" };
-    const send = async (callFields: Record<string, unknown>) => {
-      const raw = JSON.stringify({ name: "search_approved_faq", args: { question: "Is there parking?" }, call: { call_id: "call_out", from_number: "+15128231502", to_number: "+919876543210", ...callFields } });
-      return (await fetchHandler(new Request("https://worker.example/webhooks/retell/custom-function", { method: "POST", headers: { "X-Retell-Signature": await sign(raw) }, body: raw }), agentEnv)).status;
-    };
-    assert.equal(await send({ direction: "outbound", agent_id: "agent_bcd0e610f4535270f5642efeb0", metadata: { source: "healthcare-web-demo" } }), 200);
-    assert.equal(await send({ direction: "outbound", agent_id: "agent_bcd0e610f4535270f5642efeb0" }), 403, "no marker");
-    assert.equal(await send({ direction: "outbound", agent_id: "agent_other", metadata: { source: "healthcare-web-demo" } }), 403, "another agent (for example HVAC)");
-    assert.equal(await send({ direction: "inbound", agent_id: "agent_bcd0e610f4535270f5642efeb0", metadata: { source: "healthcare-web-demo" } }), 403, "inbound from a stranger");
-  });
-
-  it("records only opaque call events", async () => {
-    const raw = JSON.stringify({ event: "call_ended", call: { call_id: "call_evt", from_number: TEST_NUMBER, transcript: "secret words" } });
-    const response = await call("/webhooks/retell/events", { method: "POST", headers: { "X-Retell-Signature": await sign(raw) }, body: raw });
-    assert.equal(response.status, 200);
-    assert.deepEqual([...db.callEvents], ["call_evt:call_ended"]);
-  });
-});
-
-describe("reminder job", () => {
-  it("writes only when a simulated text is due", async () => {
-    await call("/api/demo/state", { headers: origin });
-    assert.deepEqual(await processDemoReminders(env, Date.now() - 24 * 60 * 60 * 1000), { changed: false });
-    assert.equal(db.saves, 0);
-    assert.deepEqual(await processDemoReminders(env, Date.now() + 10 * 24 * 60 * 60 * 1000), { changed: true });
-    assert.equal(db.saves, 1);
+  it("matches the stored size of a seed to what Postgres measures", () => {
+    // Verified against octet_length(state::text) in Postgres 16: jsonb prints ", " and ": " separators.
+    assert.equal(storedJsonBytes({ a: [1, "x"], b: {} }), JSON.stringify({ a: [1, "x"], b: {} }).length + 4);
+    assert.ok(storedJsonBytes(createSeedState()) < 20_000);
   });
 });

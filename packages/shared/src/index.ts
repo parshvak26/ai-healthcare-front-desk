@@ -5,8 +5,10 @@ export * from "./validation.ts";
 export * from "./schedule.ts";
 export * from "./seed.ts";
 export * from "./faq.ts";
+export * from "./names.ts";
+export * from "./spoken.ts";
 export {
-  applyDemoAction, appointmentSummary, findAppointment, isOptedOut, isRequestType, isTaskStatus, normalizeDemoState,
-  parseDemoAction, processDueMessages,
+  applyDemoAction, appointmentSummary, findAppointment, findAppointmentsByName, isOptedOut, isRequestType, isTaskStatus,
+  normalizeDemoState, parseDemoAction, processDueMessages,
 } from "./domain.ts";
 export * from "./phone.ts";

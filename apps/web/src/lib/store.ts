@@ -29,6 +29,16 @@ export function loadLocalSnapshot(): DemoSnapshot {
   return { state: createSeedState(), revision: 1 };
 }
 
+/** Removes this browser's copy ("Delete my demo data" in local mode). */
+export function clearLocalSnapshot() {
+  try {
+    localStorage.removeItem(storageKey);
+    localStorage.removeItem(legacyStorageKey);
+  } catch {
+    // Nothing stored, or storage is unavailable.
+  }
+}
+
 export function saveLocalSnapshot(snapshot: DemoSnapshot) {
   try {
     localStorage.setItem(storageKey, JSON.stringify(snapshot));
