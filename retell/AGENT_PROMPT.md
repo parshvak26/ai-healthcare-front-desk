@@ -1,9 +1,10 @@
 # Retell agent prompt — Harbor Health Front Desk Demo
 
-The prompt below is the exact text configured on the Retell draft agent **Harbor Health Front Desk Demo** (single prompt, English). The agent is unpublished and has no phone number. The Worker only answers tool calls from allowlisted test numbers, so the agent cannot change demo data until the owner chooses a pilot number, allowlists it, and approves a call budget.
+The prompt below is the exact text configured on the Retell agent **Harbor Health Front Desk Demo** (single prompt, English), published as version 0 ("Web call-me demo") on 2026-10-06. The agent has no phone number of its own: the website's "Call me" button asks the Worker to call the visitor from the shared demo number with this agent as a one-time override. The Worker answers its tool calls only for calls it started (signed, this agent, its metadata marker) or for numbers in `RETELL_TEST_NUMBERS`.
 
 Agent settings that go with it (checked in the dashboard on 2026-10-06):
 
+- Welcome message: **AI speaks first**, so an outbound demo call opens with the demo notice.
 - Data storage: **Basic Attributes Only** (no transcripts, recordings, or logs kept by Retell).
 - Safety guardrails: Platform Integrity (Jailbreaking) on input; Regulated Professional Advice on output.
 - Maximum call duration: about 4.5–4.9 minutes (the dashboard slider displays 4.9 min).
@@ -38,9 +39,9 @@ Do not collect document contents or accept uploads. Reminders, confirmations, an
 
 All booking, confirmation, cancellation, rescheduling, waitlist, FAQ lookup, document status, and staff follow-up actions go through the validated Worker tools in `tools.json`, which run the same rules as the staff console (`packages/shared/src/domain.ts`). The model never writes to storage directly. Retell sends the caller number and the transcript so far with each tool call; the Worker uses the number only for the allowlist and the call ID only for idempotency, ignores the transcript, and stores neither.
 
-## Before any live call (owner decisions, may cost money)
+## Live calls (cost money)
 
-- Choose one pilot market and a Healthcare phone number (a number has a recurring charge). Never reuse the HVAC number.
-- Add only your own test number(s), in E.164 format, to the Worker secret `RETELL_TEST_NUMBERS`.
-- Set a spending limit. At the displayed $0.139/min, a 4.5-minute call is about $0.63 before any telephony charges.
-- Publish the draft only after the steps above. SMS stays simulated until a provider, sender, consent wording, and per-message cost are chosen for that market.
+- The shared demo number is borrowed per call; never change its Retell settings or bind this agent to it, because the HVAC demo owns them.
+- Add only your own number(s), in E.164 format, to the Worker secret `RETELL_TEST_NUMBERS`. They skip the visitor limits.
+- Visitor limits: 10 calls a day, 3 per connection a day, one per number every 30 minutes, 5 minutes per call. At the displayed $0.139/min plus about $0.015/min telephony, a 5-minute call is about $0.75.
+- Edits made in the dashboard stay in a new draft until you publish them; calls use the latest published version. SMS stays simulated until a provider, sender, consent wording, and per-message cost are chosen for that market.

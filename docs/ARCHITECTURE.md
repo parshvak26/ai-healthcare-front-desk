@@ -36,7 +36,7 @@ flowchart LR
   STAFF[Front desk staff] --> UI
 ```
 
-The Retell account is active and has a Healthcare draft agent without a phone number. Its signed custom-function routes are implemented in the Worker, but no caller is allowlisted, so tool actions are rejected. Texts and reminders are simulated; no SMS provider is connected. The Worker validates demo records and never provides clinical decisions.
+The Retell account is active. The Healthcare agent is published but has no phone number of its own; the website's "Call me" button has the Worker call a visitor from the shared demo number with this agent as a one-time override. Its signed custom-function routes act only for those Worker-started calls or for allowlisted test numbers. Texts and reminders are simulated; no SMS provider is connected. The Worker validates demo records and never provides clinical decisions.
 
 ### Current implementation
 
@@ -50,7 +50,7 @@ The Retell account is active and has a Healthcare draft agent without a phone nu
 - Healthcare has a different Supabase key from HVAC. The earlier D1 migration is retained as deployment history. The application no longer reads or writes the D1 database.
 - The Worker cron task (every 15 minutes) marks due simulated texts as delivered, suppresses them after opt-out, or cancels them when the visit was cancelled or the document arrived. It writes only when something was due and never sends a text.
 - Referral/document handling is a sample checklist and status change. No file upload, private file bucket, OCR, or real record is stored.
-- The Healthcare Retell agent is a draft with no phone number. Voice actions are blocked by an empty caller allowlist, and SMS remains simulation-only.
+- The Healthcare Retell agent is published without a phone number of its own. Voice actions are accepted only for signed calls the Worker started ("Call me") or from numbers in `RETELL_TEST_NUMBERS`; SMS remains simulation-only.
 
 ## 3. Hosting and initial stack
 
@@ -298,7 +298,7 @@ Deployment follows HVAC:
 
 1. GitHub Actions installs locked dependencies and deploys only the website to GitHub Pages.
 2. The Worker and database migration are included in this repository but are deployed separately.
-3. The Retell webhook secret is in Cloudflare. The Healthcare agent is a draft; the test-number allowlist stays empty until the owner selects and approves a pilot number.
+3. The Retell webhook secret is in Cloudflare. The Healthcare agent is published; "Call me" needs the Turnstile secret and the owner's `RETELL_TEST_NUMBERS` in Cloudflare before live calls switch on.
 4. SMS has no provider; local and cloud reminder flows are simulations.
 
 ## 12. Cost plan
@@ -332,7 +332,7 @@ Cost controls:
 - Clinic scheduling timezone and viewer display timezone are separate controls.
 - Any live calls or texts must be restricted to the owner's approved test numbers.
 - Booking confirmation, 24-hour appointment reminder, and a missing-document follow-up 48 hours after booking.
-- The public UI uses demo data. The healthcare Supabase migration is applied and the Cloudflare Worker is connected and deployed; the Retell account is active, but the Healthcare agent is a draft without a phone number. Live voice actions and SMS remain disabled.
+- The public UI uses demo data. The healthcare Supabase migration is applied and the Cloudflare Worker is connected and deployed; the Retell account is active and the Healthcare agent is published for capped "Call me" demo calls from the shared demo number. SMS remains disabled.
 
 ### Open for the later live phase
 - Which countries belong under the Europe market option.
