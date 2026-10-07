@@ -1,25 +1,24 @@
 # Retell agent prompt — Harbor Health Front Desk Demo
 
-The prompt below is the text to configure on the Retell agent **Harbor Health Front Desk Demo** (single prompt, English). It replaces version 0 ("Web call-me demo", published 2026-10-06) and must be published together with the Worker that pins `RETELL_AGENT_VERSION` to the new version (see docs/plans/call-page-plan.md, R9).
+The prompt below is the text configured on the Retell agent **Harbor Health Front Desk Demo** (single prompt, English). It is published as **version 1** ("Call page + private demos", 2026-10-07), which replaced version 0 ("Web call-me demo", 2026-10-06). The Worker pins `RETELL_AGENT_VERSION = "1"`; a later dashboard change only reaches callers after it is published and the Worker is redeployed with the new number (see docs/plans/call-page-plan.md, R9).
 
 How the agent is used: it has no phone number of its own. The Worker starts every call itself — a phone call from the shared demo number (`/v2/create-phone-call` with this agent as a one-time override) or a browser call (`/v3/create-web-call`) — and passes per-call context as dynamic variables (no names), the greeting as a per-call `begin_message`, the 5-minute limit, and a per-call webhook for call status. Tool calls are answered only for those calls (signed metadata) or for allowlisted owner numbers.
 
-## Dashboard settings to apply with this version
+## Dashboard settings in version 1
 
-Values marked *recommended* need the owner's approval and a check that the field exists in the dashboard before changing.
-
-- Response engine: single prompt (below). LLM: **owner's choice** — currently GPT 5.6 Terra (≈$0.064/min, no Fast Tier). For a snappier feel, GPT-4.1 with Fast Tier (≈$0.0675/min) is the recommended alternative.
-- Temperature: 0.2 *(recommended)*.
-- Welcome message: AI speaks first; the Worker overrides the begin message per call. Begin message delay: ~1000 ms for phone calls (avoids talking over "Hello?") — the dashboard has one value, so ~700 ms is the compromise *(recommended)*.
-- Voice: keep Cimo; voice speed ~1.05 *(recommended)*.
-- Interruption sensitivity ~0.75; responsiveness 1; backchannel on, frequency ~0.4 *(recommended)*.
-- Denoising: noise and background speech cancellation *(recommended)*.
-- End call after silence: 30 s; reminder after ~9 s, at most 2 *(recommended)*.
-- Voicemail: hang up *(recommended)*.
-- Max call duration: keep the dashboard value; each call overrides it to 5 minutes.
-- Data storage: **Basic Attributes Only** (no transcripts, recordings or logs kept). Guardrails: keep jailbreak (input) and regulated professional advice (output).
-- Functions: `end_call` plus the ten custom functions in `tools.json` (remove the old `search_approved_faq`).
+- Response engine: single prompt (below). LLM: **GPT 5.6 Luna** — chosen for cost and speed: about $0.009/min with this prompt (Retell charges 1.4× above 4,000 prompt tokens) against about $0.064/min for GPT 5.6 Terra in version 0, with about 0.5 s model latency and good tool-calling and grounding scores in Retell's model benchmark. The model has no temperature setting; structured output is on (default).
+- Welcome message: AI speaks first; the Worker overrides the begin message per call. Pause before speaking: 0.6 s (so the agent doesn't talk over "Hello?" on phone calls).
+- Voice: Cimo, voice speed 1.04, volume 1.0.
+- Interruption sensitivity 0.8. Response wait time 0 ms. Reminder after 10 s of silence, once. End call after 30 s of silence.
+- Denoising: remove noise. Transcription: optimize for speed.
+- Voicemail detection on: hang up.
+- Max call duration: the dashboard value (4.9 min) is a fallback; each call overrides it to 5 minutes.
+- Data storage: **Basic Attributes Only** (no transcripts, recordings or logs kept). Guardrails: jailbreak (input) and regulated professional advice (output).
+- Functions: `end_call` plus the ten custom functions in `tools.json` (`search_approved_faq` removed): POST, 10-second timeout, no retries.
 - No agent-level webhook URL (each call sets its own).
+- Cost shown by Retell for this agent: about $0.083/min (LLM $0.009, voice $0.015, voice infrastructure $0.055, guardrails $0.005), plus about $0.015/min telephony on phone calls.
+
+Optional, not applied: "remove noise + background speech" denoising (a paid add-on, about $0.005/min more), and iOS/Android call-screen handling.
 
 ## Prompt
 
@@ -133,5 +132,5 @@ All writes go through the validated Worker tools in `tools.json`, which run the 
 - The shared demo number is borrowed per call; never change its Retell settings or bind this agent to it, because the HVAC demo owns them.
 - Owner numbers in the Worker secret `RETELL_TEST_NUMBERS` skip the visitor limits (phone calls only).
 - Visitor limits, shared by phone and browser calls: 10 calls a day, 3 per connection a day, one call per phone number every 30 minutes, 5 minutes per call, one active call per browser. Calls that never connect don't count.
-- Cost: at ≈$0.139/min plus ≈$0.015/min telephony, a 5-minute phone call is ≈$0.77 (browser calls have no telephony fee); worst case ≈$7.70 a day.
+- Cost: at ≈$0.083/min plus ≈$0.015/min telephony, a 5-minute phone call is ≈$0.49 and a 5-minute browser call ≈$0.42 (no telephony fee); worst case for visitors ≈$4.90 a day.
 - Dashboard edits stay in a draft until published. The Worker uses the version in `RETELL_AGENT_VERSION`.

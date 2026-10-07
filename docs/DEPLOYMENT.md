@@ -2,33 +2,24 @@
 
 ## Current state
 
-**Live today** (the previous version; nothing from the call page is deployed):
+**Live since 2026-10-07** (the call page release, rolled out with the five steps below):
 
-- The public React website is hosted on GitHub Pages: `https://parshvak26.github.io/ai-healthcare-front-desk/`.
-- GitHub Actions builds the website from `main`. It uses the `VITE_API_BASE_URL` repository variable when set, with the demo Worker URL as a default. It also passes the public Turnstile site key (`VITE_TURNSTILE_SITE_KEY`, not a secret) with a default.
-- Healthcare uses a separate Supabase project, keeping its service key separate from HVAC. The private schema migrations `20261003000100_healthcare_demo_backend.sql` and `20261006000100_healthcare_demo_calls.sql` are applied and verified. The Cloudflare Worker targets the protected Supabase RPC functions; its encrypted Production secret is set, and `/api/health` confirms the database connection. The old D1 migration is retained as history.
-- The Cloudflare Worker API is deployed at `https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev` (API version 2). It uses synthetic data in one shared demo clinic, simulates reminders, and answers Retell tool calls only for "Call me" calls it started or for configured test numbers.
-- Cloudflare persisted observability logs and preview URLs are disabled in the Worker configuration to keep the demo small and avoid unnecessary public preview endpoints. Use `wrangler tail` for temporary diagnostics when needed.
-- The Healthcare Retell agent has ten custom functions configured (availability, book, look up, confirm, reschedule, cancel, waitlist, FAQ, staff follow-up, document status), each with a 15-second timeout and no retries. It is published (version 0, "Web call-me demo") but not attached to any phone number. Its tools act only for "Call me" calls this Worker started (signed by Retell, Healthcare agent, this Worker's metadata marker) or for numbers in `RETELL_TEST_NUMBERS`.
-- SMS is mock-only. The Worker does not call an SMS provider, and the reminder job only updates fictional message records.
+- Website: GitHub Pages at `https://parshvak26.github.io/ai-healthcare-front-desk/`, built by GitHub Actions from `main`. The build uses the `VITE_API_BASE_URL` repository variable when set, with the demo Worker URL as a default, and the public Turnstile site key (`VITE_TURNSTILE_SITE_KEY`, not a secret) with a default. It opens on the call page at `#/` (phone calls to US +1 and India +91 numbers, and browser calls using `retell-client-js-sdk` 3.0.2); the console is the "Clinic staff screen" at `#/staff`, and every visitor gets a private demo. The click-through call simulation is removed.
+- Worker: `https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev`, API version 3 (routes in [ARCHITECTURE.md](ARCHITECTURE.md) section 8): private visitor demos, one call budget for phone and browser calls, per-call webhooks, wrong-number blocking, and a cron job that only purges. It is paired with agent version 1 (`RETELL_AGENT_VERSION = "1"`). Persisted observability logs and preview URLs are disabled to keep the demo small; use `wrangler tail` for temporary diagnostics.
+- Database: a separate Healthcare Supabase project, so its service key stays separate from HVAC. The private-schema migrations `20261003000100_healthcare_demo_backend.sql`, `20261006000100_healthcare_demo_calls.sql`, and `20261007000100_healthcare_visitor_workspaces.sql` are applied and verified. The shared snapshot table and the first-generation call functions stay in place, unused, until a later cleanup migration. The old D1 migration is kept as history.
+- Retell: the agent "Harbor Health Front Desk Demo" has version 1, "Call page + private demos", published (GPT 5.6 Luna; prompt and settings in `retell/AGENT_PROMPT.md`, the ten custom functions in `retell/tools.json`). It is not attached to any phone number: the Worker borrows the shared demo number per call. Its tools act only for calls this Worker started (signed by Retell, this agent, this Worker's metadata) or for numbers in `RETELL_TEST_NUMBERS`. Version 0 stays available as the rollback.
+- SMS is mock-only. The Worker does not call an SMS provider; texts are simulated records.
 
-**Implemented on branch `feat/call-page`, not deployed:**
-
-- Website: a call page at `#/` (phone calls to US +1 and India +91 numbers, and browser calls using `retell-client-js-sdk` 3.0.2), the console moved to `#/staff` ("Clinic staff screen"), and a private demo per visitor. The click-through call simulation is removed.
-- Worker: API version 3 (routes in [ARCHITECTURE.md](ARCHITECTURE.md) section 8). Visitor demos, one call budget for phone and browser calls, per-call webhooks, wrong-number blocking, and a cron job that only purges. `wrangler.toml` already holds the new settings `DEMO_WEB_CALLS`, `RETELL_EVENTS_URL`, and `RETELL_AGENT_VERSION`.
-- Database: `supabase/migrations/20261007000100_healthcare_visitor_workspaces.sql` (additive; not applied). The shared snapshot table and the first-generation call functions stay in place, unused, until a later cleanup migration.
-- Retell: `retell/AGENT_PROMPT.md` and `retell/tools.json` describe the next agent version (not published): `report_wrong_number` replaces `search_approved_faq`, 10-second timeouts, and the approved answers inside the prompt.
-
-## Rollout for the call page
+## Rollout for the call page (done on 2026-10-07)
 
 Do these five steps in this order. **Each step changes a live system or spends money, so each needs the owner's approval before it is done.** The tests and the build never do any of them. The order matters because the new Worker needs the new database functions, the new website needs the new Worker, and the Worker is pinned to an agent version so it never meets a prompt it was not built for.
 
 1. **Apply the migration.** Apply `supabase/migrations/20261007000100_healthcare_visitor_workspaces.sql` in the healthcare Supabase project. It is additive and runs as one transaction: it creates `healthcare.visitor_workspaces` and new service-role-only functions, and adds columns to `demo_call_requests` and `retell_call_events`. It does not change or drop any function the live Worker calls, and its table changes are additive (new columns, a wider `status` check, `phone_hash` allowed to be empty), so the live site keeps working. Check that `select to_regclass('healthcare.visitor_workspaces');` returns the table name and that `/api/health` still shows `"databaseConnected":true`.
-2. **Deploy the Worker, pinned to agent version 0.** Confirm `RETELL_AGENT_VERSION = "0"` in `wrangler.toml` (the value on the branch), then run `npm ci`, `npm run check`, and `npm run deploy:api`. Version 0 is the prompt published now; the new Worker still accepts that prompt's sample names, its `timezone` argument, and `search_approved_faq`. Run the checks under "Verification" below.
+2. **Deploy the Worker, pinned to agent version 0.** Set `RETELL_AGENT_VERSION = "0"` in `wrangler.toml`, then run `npm ci`, `npm run check`, and `npm run deploy:api`. Version 0 is the prompt published now; the new Worker still accepts that prompt's sample names, its `timezone` argument, and `search_approved_faq`. Run the checks under "Verification" below.
 3. **Update the Retell agent and publish.** In the Retell dashboard, on the agent "Harbor Health Front Desk Demo":
    - Replace the prompt with the text block in `retell/AGENT_PROMPT.md`.
    - Set the functions from `retell/tools.json`: remove `search_approved_faq`, add `report_wrong_number`, and update the other nine (POST, 10-second timeout, 0 retries, "Payload: args only" off, and the "speak during execution" sentences given there).
-   - Apply the "Dashboard settings" listed in `retell/AGENT_PROMPT.md`: temperature, voice speed, interruption and backchannel, denoising, end-of-silence and reminder timing, and **voicemail: hang up**. Data storage stays "Basic Attributes Only", the two guardrails stay on, and the agent gets no webhook URL of its own (each call sends one). The language model is the owner's choice; `AGENT_PROMPT.md` compares the two candidates.
+   - Apply the "Dashboard settings" listed in `retell/AGENT_PROMPT.md`: model, pause before speaking, voice speed, interruption, denoising, end-of-silence and reminder timing, and **voicemail: hang up**. Data storage stays "Basic Attributes Only", the two guardrails stay on, and the agent gets no webhook URL of its own (each call sends one). Version 1 uses GPT 5.6 Luna; `AGENT_PROMPT.md` lists the values applied.
    - Publish, and **write down the new version number**. The Worker is still pinned to 0, so live calls do not change yet.
    - Do not bind the agent to a phone number and do not change the shared number's settings (they belong to the HVAC demo).
 4. **Pair the Worker with the new version.** Set `RETELL_AGENT_VERSION` in `wrangler.toml` to the new number (a string such as `"1"`), then run `npm run deploy:api`. From now on phone and browser calls use the new prompt and tools. Keep the pin: a later publish in Retell then changes nothing until the Worker is redeployed with the new number. Repeat the health checks.
@@ -98,7 +89,7 @@ All are plain variables in `wrangler.toml` unless marked secret. A malformed val
 | `DEMO_CALLS` | `"on"` | Master switch. Anything other than `"on"` means off. |
 | `DEMO_WEB_CALLS` | `"on"` | Browser calls. Also needs `DEMO_CALLS = "on"` and `RETELL_EVENTS_URL`. |
 | `RETELL_EVENTS_URL` | this Worker's `/webhooks/retell/events` URL | Sent with every call so Retell reports `call_started` and `call_ended` to the Worker. Must be `https`. |
-| `RETELL_AGENT_VERSION` | `"0"` | Published agent version the Worker is paired with: an integer. Unset means `latest_published`. |
+| `RETELL_AGENT_VERSION` | `"1"` | Published agent version the Worker is paired with: an integer (`"0"` is the rollback). Unset means `latest_published`. |
 | `RETELL_FROM_NUMBER` | the shared demo number | Outbound number, a US number in E.164 form. |
 | `RETELL_AGENT_ID` | the Healthcare agent | Agent used for both channels. |
 | `TURNSTILE_HOSTNAME` | `parshvak26.github.io` | The only host whose security check is accepted. |
@@ -133,7 +124,7 @@ The Worker's cron job runs every 15 minutes and only purges; reminders are simul
 
 ### Cost
 
-Retell lists voice AI at $0.07–$0.31/min (this agent shows about $0.139/min; this changes if the model changes) plus about $0.015/min telephony for phone calls. A 5-minute phone call is roughly $0.77 and a 5-minute browser call roughly $0.70, which has no telephony fee. With 10 calls a day the visitor worst case is about $7.70/day, plus your own test calls.
+Retell lists voice AI at $0.07–$0.31/min (this agent shows about $0.083/min with GPT 5.6 Luna; this changes if the model changes) plus about $0.015/min telephony for phone calls. A 5-minute phone call is roughly $0.49 and a 5-minute browser call roughly $0.42, which has no telephony fee. With 10 calls a day the visitor worst case is about $4.90/day, plus your own test calls.
 
 ### India
 

@@ -214,7 +214,7 @@ These are included in the product direction, with mock behavior in the first dem
 ## 7. User experience
 
 ### Public demo
-- The landing page is the call page (`#/`). It explains the demo and the privacy boundary and lets a visitor get a phone call or talk in the browser. (Implemented, not deployed; the live landing page is still the console.)
+- The landing page is the call page (`#/`). It explains the demo and the privacy boundary and lets a visitor get a phone call or talk in the browser.
 - The clinic staff screen (`#/staff`) has the clinic market and timezone controls. The click-through call simulation is removed.
 - A user can inspect fictional appointments and FAQs without entering real health information.
 - A call action asks the visitor to agree first: to one AI-generated demo call at their number, or to talk with an AI voice agent and allow the microphone, and not to share real health information.

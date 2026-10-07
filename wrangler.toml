@@ -19,9 +19,10 @@ DEMO_CALLS = "on"
 DEMO_WEB_CALLS = "on"
 # Sent with every call so Retell reports call_started / call_ended to this Worker. Browser calls stay off without it.
 RETELL_EVENTS_URL = "https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev/webhooks/retell/events"
-# Published agent version this Worker is paired with (version 0 = the prompt in use before the call page). Bump it
-# after the new agent version is published in Retell, then redeploy. Remove it to use "latest_published".
-RETELL_AGENT_VERSION = "0"
+# Published agent version this Worker is paired with: 1 = "Call page + private demos" (2026-10-07). Version 0, the
+# prompt before the call page, still works with this Worker (rollback). After publishing a new version in Retell,
+# set its number here and redeploy. Remove it to use "latest_published".
+RETELL_AGENT_VERSION = "1"
 RETELL_FROM_NUMBER = "+15128231502"
 RETELL_AGENT_ID = "agent_bcd0e610f4535270f5642efeb0"
 TURNSTILE_HOSTNAME = "parshvak26.github.io"

@@ -2,18 +2,18 @@
 # AI Healthcare Front Desk — Architecture
 
 **Status:** Implementation architecture
-**Version:** 0.4
-**Date:** 2026-10-06  
+**Version:** 0.5
+**Date:** 2026-10-07  
 **Scope:** Architecture for the demo described in PRD.md. This is not a production clinical system.
 
-**Implemented vs deployed.** This document describes the code on branch `feat/call-page`. The call page, private visitor demos, browser calls, and API version 3 are implemented and covered by the automated tests, but **none of them is deployed**. The live site still runs the previous version, which the rollout in [DEPLOYMENT.md](DEPLOYMENT.md) replaces step by step (each step needs the owner's approval). Parts marked "(not deployed)" below exist only in the code.
+**Deployed.** This document describes the live system: the call page, private visitor demos, browser calls, and API version 3 have been live since 2026-10-07 (rollout in [DEPLOYMENT.md](DEPLOYMENT.md)).
 
-| Part | Live today | On the branch (not deployed) |
-|---|---|---|
-| Website | Console with a "Call me" panel; one shared demo clinic | Call page `#/`, clinic staff screen `#/staff`, private demo per visitor, browser calls |
-| Worker | API version 2; shared snapshot; cron marks simulated texts delivered | API version 3; visitor workspaces; phone and browser calls; cron only purges |
-| Database | Migrations `20261003000100`, `20261006000100` | Adds `20261007000100_healthcare_visitor_workspaces.sql` |
-| Retell agent | Version 0, ten functions including `search_approved_faq` | Next version in `retell/`: `report_wrong_number` replaces `search_approved_faq` |
+| Part | Live |
+|---|---|
+| Website | Call page `#/`, clinic staff screen `#/staff`, private demo per visitor, browser calls |
+| Worker | API version 3; visitor workspaces; phone and browser calls; cron only purges; paired with agent version 1 |
+| Database | Migrations `20261003000100`, `20261006000100`, `20261007000100_healthcare_visitor_workspaces.sql` |
+| Retell agent | Version 1 (GPT 5.6 Luna): prompt and ten functions in `retell/`, `report_wrong_number` instead of `search_approved_faq` |
 
 ## 1. Design goals
 
@@ -30,7 +30,7 @@
 
 An explorable diagram is available at [architecture-diagram.html](architecture-diagram.html). The diagram shows the target system and has not been updated for the call page or private demos; the current build status below marks which parts are connected.
 
-The diagram below shows the system on the branch (not deployed). The live system is the same without the call page: the console starts "Call me" calls and uses one shared demo clinic.
+The diagram below shows the live system.
 
 ```mermaid
 flowchart LR
@@ -56,20 +56,20 @@ The Retell account is active. The Healthcare agent is published but has no phone
 ### Current implementation
 
 - **Shared domain package.** `packages/shared/src` holds the fictional catalog, timezone helpers, the strict snapshot validator, patient-name rules and matching, slot search and reminder rules, the approved-FAQ lookup and its spoken versions, and `applyDemoAction` — the single function that performs every front-desk change. The browser, the Worker API, the Retell tools, and the reminder simulation all use it, so channels cannot drift apart.
-- **Two screens on hash routes (not deployed).** `#/` is the call page and the default; `#/staff` is the clinic staff screen, loaded as its own chunk. An unknown hash opens the call page. Hash routes mean GitHub Pages needs no rewrite rules. The demo connection and the call controller live above the router, so moving to the staff screen neither reloads the clinic nor ends a browser call; a small "call in progress" bar shows on the staff screen.
-- **Private demo per visitor (not deployed).** See "Private demos" below. Every change and every voice tool call acts on one visitor's own copy; the shared clinic is retired.
+- **Two screens on hash routes.** `#/` is the call page and the default; `#/staff` is the clinic staff screen, loaded as its own chunk. An unknown hash opens the call page. Hash routes mean GitHub Pages needs no rewrite rules. The demo connection and the call controller live above the router, so moving to the staff screen neither reloads the clinic nor ends a browser call; a small "call in progress" bar shows on the staff screen.
+- **Private demo per visitor.** See "Private demos" below. Every change and every voice tool call acts on one visitor's own copy; the shared clinic is retired.
 - **Server-authoritative writes.** In cloud mode the staff screen sends one action at a time to `POST /api/demo/actions` with an idempotency key. The Worker applies it to the latest copy of the visitor's demo inside an optimistic-concurrency loop (revision check, up to five attempts) and returns the saved copy. The screen updates only from that response, so it never shows a booking the server refused. The old whole-snapshot `PUT /api/demo/state` route is retired (HTTP 410).
 - **Idempotency.** Record IDs are derived from the idempotency key (`stableId`). Replaying the same request returns the original result without writing; if that booking was since cancelled or moved, the same request is treated as a new booking instead of reporting the old one. Retell tools build the key from the call ID, the tool name, and the canonical action (timestamps re-parsed, names compared without case, accents, or punctuation), so a repeated tool call in one conversation cannot double-book. The staff screen uses one key per distinct choice in a dialog.
 - **Exact confirmation.** Bookings and moves carry the provider that was shown; if that provider is no longer free the request is refused rather than silently given to another provider or location. One person cannot hold two overlapping visits (names are compared without case, accents, or punctuation).
 - **Capacity.** Each private demo is bounded (see "Private demos"). When a list is full of open work, new requests are refused with a "reset the demo" message; open bookings, tasks, and pending texts are never deleted to make room. Read and write rate limits use separate per-client buckets.
 - **Local mode.** If `VITE_API_BASE_URL` is empty, or the Worker is unreachable, has no database connection, or is older than API version 3, the website runs the same rules against a private copy in browser storage and says so on screen. Calls are off in this mode.
-- The Worker uses a private `healthcare` schema in a separate free Supabase project. Its migrations are in `supabase/migrations/`; only server-side RPC functions are exposed to the Worker, and the browser never connects to Supabase. The call page release adds one migration (not applied; see [DEPLOYMENT.md](DEPLOYMENT.md)).
+- The Worker uses a private `healthcare` schema in a separate free Supabase project. Its migrations are in `supabase/migrations/`; only server-side RPC functions are exposed to the Worker, and the browser never connects to Supabase. The call page release added one migration (applied; see [DEPLOYMENT.md](DEPLOYMENT.md)).
 - Healthcare has a different Supabase key from HVAC. The earlier D1 migration is retained as deployment history. The application no longer reads or writes the D1 database.
-- **Cron.** The Worker cron task (every 15 minutes) is the retention job: it deletes expired private demos and old call records (see "Private demos"). On the branch it no longer touches message records (not deployed); the live Worker's cron still marks due simulated texts as delivered. Simulated reminders now run in memory whenever a private demo is read and before every change, so no job has to visit every demo. The browser also applies them on its own clock. Nothing sends a text.
+- **Cron.** The Worker cron task (every 15 minutes) is the retention job: it deletes expired private demos and old call records (see "Private demos"). It does not touch message records. Simulated reminders now run in memory whenever a private demo is read and before every change, so no job has to visit every demo. The browser also applies them on its own clock. Nothing sends a text.
 - Referral/document handling is a sample checklist and status change. No file upload, private file bucket, OCR, or real record is stored.
 - The Healthcare Retell agent is published without a phone number of its own. Voice actions are accepted only for signed calls the Worker started (phone or browser) or from numbers in `RETELL_TEST_NUMBERS`; SMS remains simulation-only.
 
-### Private demos (not deployed)
+### Private demos
 
 - **Visitor key.** The browser creates 32 random bytes (43 base64url characters) once and keeps them in `localStorage` under `caredesk-visitor-v1`. If storage is unavailable the key lives in memory and the demo ends with the tab. The key is sent as the `X-Demo-Visitor` header on every visitor route. A request without it gets `409 reload_required` (old open tabs are asked to reload); a malformed key gets `400 invalid_visitor`.
 - **Workspace ID.** The Worker computes `workspace_id` as an HMAC-SHA256 of the key, keyed with a value derived from `SUPABASE_SECRET_KEY`. The raw key is never stored or logged. The demo is one row in `healthcare.visitor_workspaces`: the state JSON (at most 128 KB), a revision, `created_at` (its "generation", which tells the browser the demo was deleted and re-created), `last_used_at`, and whether it ever had a call.
@@ -80,7 +80,7 @@ The Retell account is active. The Healthcare agent is published but has no phone
 - **Retired shared clinic.** The old `demo_state_snapshots` table and the first-generation call functions stay in the database, unused, until a later cleanup migration. A test checks that the Worker never calls them.
 - **Accepted limit.** `localStorage` is shared by every page on `parshvak26.github.io`, so those pages (including the HVAC demo) can read the visitor key. It protects synthetic data and self-chosen names only.
 
-### Demo calls (not deployed)
+### Demo calls
 
 - **Two channels, one budget.** `POST /api/demo-call` starts a phone call (US +1 or India +91 number); `POST /api/demo-web-call` creates a browser call. Both need consent and a Cloudflare Turnstile token (hostname and action are checked). Order: validate, write rate limit, Turnstile, make sure the visitor's demo exists, reserve in the budget, call Retell, record the outcome.
 - **Reservation.** One SQL function under an advisory lock checks, in order: the number is blocked after a wrong-number report (30 days); the browser already has a call that may be live; the same number was called in the last 30 minutes; the connection used its 3 calls in 24 hours; the 10 calls of the UTC day are used up. A call counts unless there is evidence it never connected (Retell refused it, or it ended with a connection error and never started). A call that never starts stops blocking the next one after 2 minutes but still counts. Owner numbers (`RETELL_TEST_NUMBERS`) skip the block, cooldown, and both limits, for phone calls only. See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact rules and settings.
@@ -100,7 +100,7 @@ The Retell account is active. The Healthcare agent is published but has no phone
 |---|---|---|
 | Public web UI | React, Vite, TypeScript; GitHub Pages; hash routes | Matches HVAC, static build, low hosting cost. Public source/site is intended for a portfolio demo with synthetic data. |
 | CI and web deploy | GitHub Actions workflow on main and manual dispatch | Runs project checks, builds the UI, then deploys the static artifact, like HVAC. |
-| Private API | Cloudflare Worker with TypeScript and Wrangler | Matches HVAC; holds API secrets, receives provider webhooks, and runs a scheduled job (on the branch it only purges expired demo data; the live Worker's job also marks simulated texts delivered). |
+| Private API | Cloudflare Worker with TypeScript and Wrangler | Matches HVAC; holds API secrets, receives provider webhooks, and runs a scheduled job (it only purges expired demo data). |
 | Demo database | Dedicated Supabase free project with private `healthcare` schema; one private demo per visitor | Keeps the healthcare tables and service key separate from HVAC. |
 | Demo file storage | Not connected | The current public demo stores sample document status only; it does not upload files. |
 | Voice | Retell voice agent: outbound phone calls to visitors and browser (web) calls; no inbound number | Uses the existing voice-agent provider and webhook pattern. The Worker starts every call, so it controls the budget and the per-call context. |
@@ -167,7 +167,7 @@ Provider creation is controlled by explicit environment modes, such as VOICE_MOD
 
 ### 5.1 Demo call and appointment booking
 
-The visitor starts the call from the call page; nobody dials in. (Implemented, not deployed. The live site starts "Call me" calls from the console in the same way, against the shared clinic.)
+The visitor starts the call from the call page; nobody dials in.
 
 1. The visitor chooses "Call my phone" or "Talk in browser", agrees to the call, and passes the security check.
 2. The Worker validates the request, makes sure the visitor's private demo exists, reserves the call in the shared budget, and asks Retell to start it with per-call context (dates, calendar, new or returning caller, time zone, emergency number) and the greeting. A phone call rings the visitor from the shared demo number; a browser call joins with a short-lived token.
@@ -192,7 +192,7 @@ The visitor starts the call from the call page; nobody dials in. (Implemented, n
 
 ### 5.3 Reminder and follow-up job
 
-The demo creates simulated message records: a booking confirmation, a 24-hour appointment reminder (skipped when the visit is less than a day away), and — for new patient visits and consultations — one missing-document follow-up 48 hours after booking (skipped if the visit comes first). Every simulated text is moved out of quiet hours (before 9 AM or after 8 PM clinic time) and is recorded as `Suppressed (opt-out)` for a patient who has replied STOP. Rescheduling moves the reminder; cancelling an appointment, recording a missed visit, or receiving the sample document cancels the matching pending texts. The reminder simulation re-checks opt-out, cancellation, and document status at delivery time. With no API URL configured, records stay in the browser and the same simulation runs there. When the Worker is configured, the simulation runs in memory whenever a private demo is read and before every change, and the scheduled job does not touch messages (not deployed; the live Worker's job still delivers due texts for the shared clinic). Messages remain simulations in either mode.
+The demo creates simulated message records: a booking confirmation, a 24-hour appointment reminder (skipped when the visit is less than a day away), and — for new patient visits and consultations — one missing-document follow-up 48 hours after booking (skipped if the visit comes first). Every simulated text is moved out of quiet hours (before 9 AM or after 8 PM clinic time) and is recorded as `Suppressed (opt-out)` for a patient who has replied STOP. Rescheduling moves the reminder; cancelling an appointment, recording a missed visit, or receiving the sample document cancels the matching pending texts. The reminder simulation re-checks opt-out, cancellation, and document status at delivery time. With no API URL configured, records stay in the browser and the same simulation runs there. When the Worker is configured, the simulation runs in memory whenever a private demo is read and before every change, and the scheduled job does not touch messages. Messages remain simulations in either mode.
 
 For the later connected version:
 
@@ -240,7 +240,7 @@ Every row is scoped to a clinic. A tenant_id field prepares the model for more t
 | outbound_messages | Delivery/idempotency state | purpose, scheduled_at, status, provider_id, attempts |
 | audit_events | Sensitive workflow change record | actor, action, target_id, created_at, safe metadata |
 
-### What the demo build stores (not deployed)
+### What the demo build stores
 
 The table above is the target model. The demo keeps the records it uses (appointments, waitlist entries, staff tasks, referral items, simulated messages, change history, and text preferences) as one validated JSON state per private demo, not as separate tables. Clinic settings, services, providers, and the FAQ catalog are code in the shared package. The healthcare schema holds:
 
@@ -289,7 +289,7 @@ All market-specific templates are configuration data, not prompt code.
 
 ## 8. API and event contracts
 
-Routes in the Worker on the branch (API version 3, reported by `/api/health`; not deployed). The live Worker is version 2 and still serves one shared clinic. Every route except health, the FAQ list, and the webhooks needs the `X-Demo-Visitor` header (see "Private demos").
+Routes in the Worker (API version 3, reported by `/api/health`). Every route except health, the FAQ list, and the webhooks needs the `X-Demo-Visitor` header (see "Private demos").
 
 - `GET /api/health` — status, `apiVersion`, database reachability, `liveSmsEnabled: false` (hard-wired), and `liveCallsEnabled` (true only when every call setting is valid). `demoCalls` reports whether calls are on (`enabled`), the countries, the demo number, the minutes per call, the daily limit, and `web.enabled` for browser calls. `privateDemo.retentionDays` is 7.
 - `GET /api/demo/state` — the visitor's own demo, its revision, its generation, and whether it is saved yet. With `?known=<generation>.<revision>` it answers `{ unchanged: true }` when the browser is current.
@@ -400,8 +400,7 @@ Cost controls:
 - Live texts stay off. Live calls are limited to consenting visitors who pass the bot check and share one budget (US and India numbers, browser calls); only the owner's test numbers are exempt from the phone limits.
 - Each visitor gets a private demo that is deleted 7 days after last use; the shared clinic is retired.
 - Booking confirmation, 24-hour appointment reminder, and a missing-document follow-up 48 hours after booking.
-- **Live today:** the public UI uses demo data. The first two healthcare migrations are applied, the Worker (API version 2) is connected and deployed, and the Retell Healthcare agent (version 0) is published for capped "Call me" demo calls from the shared demo number. SMS remains disabled.
-- **Implemented, not deployed:** the call page, browser calls, private demos, and API version 3 on branch `feat/call-page`, with the migration `20261007000100_healthcare_visitor_workspaces.sql` and the new agent files in `retell/`. The rollout order is in [DEPLOYMENT.md](DEPLOYMENT.md).
+- **Live since 2026-10-07:** the call page, browser calls, private demos, and API version 3, with the migration `20261007000100_healthcare_visitor_workspaces.sql` applied and Retell agent version 1 (the files in `retell/`) published. The rollout order is in [DEPLOYMENT.md](DEPLOYMENT.md). SMS remains disabled.
 
 ### Open for the later live phase
 - A cleanup migration that drops `demo_state_snapshots` and the first-generation call functions, after the call page rollout is stable.
