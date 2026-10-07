@@ -328,7 +328,13 @@ function CallForm({ info, mode, onMode, onSwitch }: { info: DemoCallsInfo; mode:
       </>}
     </div>
 
-    <TurnstileWidget resetKey={resetKey} onToken={(value) => { setToken(value); if (value) setCheckError(""); }} onError={setCheckError} />
+    <TurnstileWidget resetKey={resetKey} onToken={(value) => {
+      setToken(value);
+      if (!value) return;
+      setCheckError("");
+      // A fresh token replaces the one the server refused, so that refusal no longer applies.
+      if (controller.error?.code === "verification_failed" || controller.error?.code === "verification_required") controller.clearError();
+    }} onError={setCheckError} />
     {error && error.channel === mode && <ErrorBox error={error} onSwitch={onSwitch} />}
 
     <button type="submit" className={`cp-btn cp-btn-primary cp-btn-block cp-cta ${ready ? "" : "is-waiting"}`} aria-describedby="cta-reason" aria-busy={busy}>

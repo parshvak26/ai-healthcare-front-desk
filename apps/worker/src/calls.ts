@@ -115,11 +115,20 @@ async function verifyTurnstile(env: Env, token: string, remoteIp: string) {
   } catch {
     throw new DomainError(503, "verification_unavailable", "The security check could not be completed. Please try again.");
   }
-  let result: { success?: boolean; hostname?: string; action?: string } = {};
+  let result: { success?: boolean; hostname?: unknown; action?: unknown; "error-codes"?: unknown } = {};
   try { result = await response.json() as typeof result; } catch { /* treated as failed below */ }
-  return result.success === true
-    && result.hostname === (env.TURNSTILE_HOSTNAME || "parshvak26.github.io")
-    && result.action === turnstileAction;
+  const hostnameMatches = result.hostname === (env.TURNSTILE_HOSTNAME || "parshvak26.github.io");
+  const actionMatches = result.action === turnstileAction;
+  const passed = result.success === true && hostnameMatches && actionMatches;
+  if (!passed) {
+    // Why the check failed, for `wrangler tail` (never the token or the IP). "invalid-input-response" usually means the
+    // website's site key and TURNSTILE_SECRET_KEY belong to different widgets; "timeout-or-duplicate" means an expired or
+    // reused token; "invalid-input-secret" means the secret itself is wrong.
+    const codes = Array.isArray(result["error-codes"]) ? result["error-codes"].filter((code) => typeof code === "string").slice(0, 5) : [];
+    const hostname = typeof result.hostname === "string" ? result.hostname.slice(0, 100) : null;
+    console.warn(JSON.stringify({ event: "turnstile_failed", status: response.status, codes, hostname, hostnameMatches, actionMatches }));
+  }
+  return passed;
 }
 
 /** "+1 (415) 555-0123" → "+1 (•••) •••-0123": enough to recognise your own number, not to read someone else's. */

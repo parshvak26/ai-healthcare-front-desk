@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { fetchHandler } from "../src/app.ts";
 import type { Env } from "../src/app.ts";
 import { callOutcome } from "../src/calls.ts";
@@ -34,7 +34,7 @@ beforeEach(() => {
       const form = new URLSearchParams(String(init?.body));
       assert.equal(form.get("secret"), "turnstile-secret");
       turnstileIps.push(form.get("remoteip"));
-      return json({ success: turnstileOk, hostname: "demo.example", action: "healthcare_demo_call" });
+      return json({ success: turnstileOk, hostname: "demo.example", action: "healthcare_demo_call", ...(turnstileOk ? {} : { "error-codes": ["invalid-input-response"] }) });
     },
     retell: (url, init) => {
       assert.equal(new Headers(init?.headers).get("Authorization"), "Bearer test-retell-key");
@@ -177,7 +177,17 @@ describe("Call my phone", () => {
     assert.equal((await phoneCall("+44 20 7183 8750")).status, 400);
     assert.equal((await phoneCall("+14155550123", {}, { extra: "x" })).status, 400);
     turnstileOk = false;
-    assert.equal((await bodyOf(await phoneCall("+14155550123"))).error.code, "verification_failed");
+    const warn = mock.method(console, "warn", () => {});
+    try {
+      assert.equal((await bodyOf(await phoneCall("+14155550123"))).error.code, "verification_failed");
+      const logged = warn.mock.calls.map((call) => String(call.arguments[0]));
+      assert.deepEqual(logged.map((line) => JSON.parse(line)), [
+        { event: "turnstile_failed", status: 200, codes: ["invalid-input-response"], hostname: "demo.example", hostnameMatches: true, actionMatches: true },
+      ]);
+      assert.ok(logged.every((line) => !line.includes("token-from-turnstile-widget") && !line.includes("203.0.113.7")), "the log never holds the token or the IP");
+    } finally {
+      warn.mock.restore();
+    }
     assert.equal(created().length, 0);
     assert.equal(db.workspaces.size, 0, "no workspace before the security check passes");
   });

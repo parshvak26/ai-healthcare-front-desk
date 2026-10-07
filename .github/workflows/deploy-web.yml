@@ -52,8 +52,9 @@ jobs:
       - name: Build website
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || 'https://ai-healthcare-front-desk-api.halo-voice-parshva.workers.dev' }}
-          # Public Turnstile site key (shared with the HVAC demo on the same github.io host). Not a secret.
-          VITE_TURNSTILE_SITE_KEY: ${{ vars.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAEl0ElgkF9D_kKtg' }}
+          # Public site key of the Healthcare Turnstile widget ("VoiceAI", host parshvak26.github.io). Not a secret. The
+          # Worker's TURNSTILE_SECRET_KEY must be the secret of this same widget, or every call request fails the check.
+          VITE_TURNSTILE_SITE_KEY: ${{ vars.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAEclqdMgt_J-s6k9' }}
         run: npm run build
 
       - name: Upload website files
