@@ -332,8 +332,6 @@ function CallForm({ info, mode, onMode, onSwitch }: { info: DemoCallsInfo; mode:
       setToken(value);
       if (!value) return;
       setCheckError("");
-      // A fresh token replaces the one the server refused, so that refusal no longer applies.
-      if (controller.error?.code === "verification_failed" || controller.error?.code === "verification_required") controller.clearError();
     }} onError={setCheckError} />
     {error && error.channel === mode && <ErrorBox error={error} onSwitch={onSwitch} />}
 
