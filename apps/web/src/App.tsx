@@ -189,10 +189,10 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand-lockup">
+        <a className="brand-lockup" href={routeHref.call} aria-label="CareDesk demo home" title="Back to demo home">
           <div className="brand-symbol"><span>+</span></div>
           <div><div className="brand-name">caredesk</div><div className="brand-caption">FRONT DESK OS</div></div>
-        </div>
+        </a>
         <div className="clinic-switcher">
           <span className="clinic-avatar">HC</span>
           <span className="clinic-name"><strong>Harbor Health</strong><small>Demo clinic</small></span>
@@ -222,7 +222,7 @@ function App() {
       <main className="main-area">
         <CallStatusBar />
         <header className="topbar">
-          <div className="breadcrumb"><a className="crumb-home" href={routeHref.call}>CareDesk demo</a><span className="crumb-divider">/</span><span>Harbor Health</span><span className="crumb-divider">/</span><strong>{page}</strong></div>
+          <div className="breadcrumb"><a className="crumb-home" href={routeHref.call}>← Demo home</a><span className="crumb-divider">/</span><span>Harbor Health</span><span className="crumb-divider">/</span><strong>{page}</strong></div>
           <div className="topbar-actions">
             <span className={`demo-indicator ${connection === "fallback" ? "demo-indicator-warning" : ""}`} role="status"><span className="online-dot" />{busy ? "SAVING…" : indicator}</span>
             <Avatar name="Owner" size="small" />

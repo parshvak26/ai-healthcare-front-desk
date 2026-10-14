@@ -23,7 +23,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 
 .app-shell { min-height: 100vh; }
 .sidebar { width: 246px; position: fixed; z-index: 10; inset: 0 auto 0 0; display: flex; flex-direction: column; padding: 24px 15px 17px; background: #fff; border-right: 1px solid #e9edf2; }
-.brand-lockup { display: flex; align-items: center; gap: 10px; padding: 0 9px 23px; }
+.brand-lockup { display: flex; align-items: center; gap: 10px; padding: 0 9px 23px; border-radius: 8px; color: inherit; text-decoration: none; }
+.brand-lockup:hover .brand-name { color: #0b827b; }
 .brand-symbol { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; background: #e4f5f1; color: #0b8a83; font: 800 27px/1 Manrope, sans-serif; }
 .brand-symbol span { transform: translateY(-1px); }
 .brand-name { color: #16384a; font: 800 18px/1.05 Manrope, sans-serif; letter-spacing: -.7px; }
@@ -461,15 +462,15 @@ h1 { margin: 8px 0 5px; color: #1e3246; font: 700 26px/1.2 Manrope, sans-serif; 
 a.button, a.assistant-link, a.text-button { text-decoration: none; }
 a:focus-visible { outline: 3px solid rgba(11, 138, 131, .23); outline-offset: 2px; border-radius: 4px; }
 [tabindex="-1"]:focus { outline: none; }
-.crumb-home { color: #6f8a85; font-weight: 700; text-decoration: none; }
-.crumb-home:hover { color: #0b827b; }
+.crumb-home { display: inline-flex; align-items: center; min-height: 34px; padding: 0 11px; border: 1px solid #dfeae7; border-radius: 999px; background: #fff; color: #236760; font-size: 10px; font-weight: 700; text-decoration: none; white-space: nowrap; }
+.crumb-home:hover { border-color: #b8d8d1; background: #f5fbf9; color: #08766f; }
 .from-call-tag { display: inline-flex; align-items: center; margin-left: 7px; padding: 2px 6px; border-radius: 4px; background: #e3f3f0; color: #07625c; font-size: 7px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; vertical-align: 1px; }
 .button-danger { color: #a3352c; border-color: #f0d3cf; }
 .button-danger:hover { border-color: #d9867e; background: #fff8f7; }
 .settings-call-link { margin-top: 10px; padding-left: 0; }
 .turnstile-box { min-height: 65px; }
 @media (max-width: 720px) {
-  /* Keep the "private demo" indicator visible on phones; the page name is enough breadcrumb there. */
-  .breadcrumb > :not(strong) { display: none; }
+  /* Keep an obvious route back to the public demo page in the compact header. */
+  .breadcrumb > :not(.crumb-home) { display: none; }
   .demo-indicator { display: flex; gap: 6px; font-size: 7.5px; letter-spacing: .5px; text-align: right; }
 }
